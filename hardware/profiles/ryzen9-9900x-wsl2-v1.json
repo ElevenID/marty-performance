@@ -1,0 +1,26 @@
+{
+  "schema": "marty.performance/hardware-profile/v1",
+  "id": "ryzen9-9900x-12c24t-32gb-docker16gb-v1",
+  "status": "provisional",
+  "host": {
+    "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+    "physical_cores": 12,
+    "logical_cpus": 24,
+    "memory_bytes": 33345101824,
+    "operating_system": "Windows 11 Home"
+  },
+  "docker": {
+    "server_os": "linux",
+    "server_arch": "amd64",
+    "logical_cpus": 24,
+    "memory_bytes": 16265678848,
+    "backend": "WSL2"
+  },
+  "cpu_partition": {
+    "status": "pending-topology-validation",
+    "system_under_test": null,
+    "telemetry": null,
+    "load_generator": null
+  }
+}
+

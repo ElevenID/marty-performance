@@ -1,0 +1,51 @@
+{
+  "schema": "marty.stack/v1",
+  "release": "marty-ui@1.2.3",
+  "generated_at": "2026-08-26T00:00:00Z",
+  "components": [
+    {
+      "name": "marty-ui",
+      "repository": "ElevenID/marty-ui",
+      "version": "1.2.3",
+      "commit": "1111111111111111111111111111111111111111",
+      "artifacts": [
+        {
+          "type": "oci",
+          "uri": "ghcr.io/elevenid/marty-ui-oss/ui",
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "sbom": "https://github.com/ElevenID/marty-ui/releases/download/v1.2.3/ui.spdx.json",
+          "provenance": "https://github.com/ElevenID/marty-ui/attestations/1"
+        },
+        {
+          "type": "oci",
+          "uri": "ghcr.io/elevenid/marty-ui-oss/services",
+          "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "sbom": "https://github.com/ElevenID/marty-ui/releases/download/v1.2.3/services.spdx.json",
+          "provenance": "https://github.com/ElevenID/marty-ui/attestations/2"
+        },
+        {
+          "type": "oci",
+          "uri": "ghcr.io/elevenid/marty-ui-oss/migrations",
+          "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "sbom": "https://github.com/ElevenID/marty-ui/releases/download/v1.2.3/migrations.spdx.json",
+          "provenance": "https://github.com/ElevenID/marty-ui/attestations/3"
+        }
+      ]
+    },
+    {
+      "name": "marty-credentials-issuance",
+      "repository": "ElevenID/marty-credentials",
+      "version": "0.1.70",
+      "commit": "4444444444444444444444444444444444444444",
+      "artifacts": [
+        {
+          "type": "oci",
+          "uri": "ghcr.io/elevenid/marty-credentials-issuance",
+          "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "sbom": "https://github.com/ElevenID/marty-credentials/releases/download/v0.1.70/issuance.spdx.json",
+          "provenance": "https://github.com/ElevenID/marty-credentials/attestations/4"
+        }
+      ]
+    }
+  ]
+}

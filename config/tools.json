@@ -1,0 +1,7 @@
+{
+  "schema": "marty.performance/tools/v1",
+  "k6": {
+    "version": "1.3.0",
+    "image": "docker.io/grafana/k6@sha256:3ddc8b1a33a2c3d8edc6e99b6a762ae36cba08788463458f5e6a7703e14eb77d"
+  }
+}

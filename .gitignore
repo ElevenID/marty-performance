@@ -1,0 +1,8 @@
+/target/
+/.idea/
+/.vscode/
+/.env.stack
+/reports/*
+!/reports/.gitkeep
+*.profraw
+perf.data*

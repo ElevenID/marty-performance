@@ -9,4 +9,3 @@ Before the profile becomes comparable it will add explicit resource limits,
 verified CPU partitions, isolated k6 and telemetry containers, Prometheus,
 Grafana, and container-resource collection. A separate diagnostic overlay will
 enable tracing or native profiling without changing the comparable profile.
-

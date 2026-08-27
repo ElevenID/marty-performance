@@ -39,10 +39,14 @@ stack input. The comparison contract will additionally require matching:
 Migration-preview evidence may omit those bindings for fixture and early
 cutover diagnostics, but it cannot be promoted as a durable baseline.
 
+Doctor distinguishes intended test containers using explicit, recorded name
+prefixes. Every other running container makes the host non-comparable. A local
+k6 binary is selected only when it exactly matches the configured version;
+otherwise execution uses the digest-pinned container.
+
 ## Safety
 
 The repository uses synthetic subjects, credentials, issuers, and keys.
 Production traffic replay and production identity records are out of scope.
 Route labels must use templates; metrics and reports must not retain tenant,
 applicant, credential, issuer, or trace identifiers.
-

@@ -9,4 +9,3 @@ The initial workstation is represented by
 and Docker CPU-set enforcement are verified. Comparable results must retain
 the exact Docker memory cap instead of reporting only the host's installed
 memory.
-

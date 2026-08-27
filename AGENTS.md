@@ -18,4 +18,3 @@
 - Before review, run `cargo fmt --all -- --check`,
   `cargo clippy --locked --workspace --all-targets -- -D warnings`, and
   `cargo test --locked --workspace --all-targets`.
-

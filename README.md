@@ -30,8 +30,9 @@ baselines.
 - A released `marty.stack/v1` manifest for stack preparation
 - A running Marty gateway for the smoke scenario
 
-A local k6 installation is optional. The runner falls back to the pinned
-`grafana/k6` container recorded in `config/tools.json`.
+A local k6 installation is optional and is used only when its version exactly
+matches `config/tools.json`. Otherwise the runner falls back to the pinned
+`grafana/k6` container.
 
 To verify the runner without a Marty deployment, start the Rust mock gateway
 in a separate terminal and target port 28080:
@@ -60,13 +61,22 @@ the run:
 ```console
 cargo run -p marty-perf -- doctor \
   --output reports/doctor.json \
-  --require-comparable
+  --require-comparable \
+  --allow-container-prefix marty-performance-
 cargo run -p marty-perf -- run smoke \
   --base-url http://127.0.0.1:28000 \
   --result-class local-comparable \
   --doctor-report reports/doctor.json \
   --stack-input reports/prepared-stack/stack-input.json
 ```
+
+Repeat `--allow-container-prefix` for each intentionally running Compose
+project. The accepted prefixes and counts are retained in `doctor.json`; a
+prefix must contain at least four safe container-name characters.
+
+The runner accepts loopback targets by default. An isolated remote test cluster
+requires the explicit `--allow-remote-target` flag. That flag does not permit
+production traffic or production personal data.
 
 `stack prepare` requires exactly one image for each public stack role:
 `ui`, `services`, `migrations`, and `marty-credentials-issuance`. Mutable OCI

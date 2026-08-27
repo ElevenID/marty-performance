@@ -38,6 +38,9 @@ struct DoctorArgs {
     /// Exit unsuccessfully when unrelated containers make comparison unsafe.
     #[arg(long)]
     require_comparable: bool,
+    /// Treat running containers whose names start with this prefix as intended.
+    #[arg(long = "allow-container-prefix")]
+    allowed_container_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -94,14 +97,22 @@ struct SmokeArgs {
     /// `doctor.json` used to qualify non-preview runs.
     #[arg(long)]
     doctor_report: Option<PathBuf>,
-    /// Replace existing run metadata in the output directory.
+    /// Explicitly permit a non-loopback target such as an isolated test cluster.
+    #[arg(long)]
+    allow_remote_target: bool,
+    /// Remove and replace known run artifacts in the output directory.
     #[arg(long)]
     force: bool,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Doctor(args) => doctor::run(&args.output, args.force, args.require_comparable),
+        Command::Doctor(args) => doctor::run(
+            &args.output,
+            args.force,
+            args.require_comparable,
+            &args.allowed_container_prefixes,
+        ),
         Command::Stack(args) => match args.command {
             StackCommand::Prepare(args) => {
                 stack::prepare(&args.manifest, &args.output_dir, args.force)
@@ -114,6 +125,7 @@ fn main() -> Result<()> {
                 &args.result_class,
                 args.stack_input.as_deref(),
                 args.doctor_report.as_deref(),
+                args.allow_remote_target,
                 args.force,
             ),
         },

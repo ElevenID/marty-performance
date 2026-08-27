@@ -12,7 +12,7 @@ use chrono::Utc;
 use marty_perf_schema::{DoctorReport, PreparedStack, RunMetadata};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 
 use crate::tooling;
@@ -23,6 +23,14 @@ const RESULT_CLASSES: &[&str] = &[
     "diagnostic",
     "k8s-canonical",
 ];
+const RUN_ARTIFACTS: &[&str] = &[
+    "run.json",
+    "summary.json",
+    "samples.json",
+    "k6.stdout.log",
+    "k6.stderr.log",
+    "runner.error.log",
+];
 
 pub(crate) fn smoke(
     base_url: &str,
@@ -30,6 +38,7 @@ pub(crate) fn smoke(
     result_class: &str,
     stack_input: Option<&Path>,
     doctor_report: Option<&Path>,
+    allow_remote_target: bool,
     force: bool,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -41,18 +50,14 @@ pub(crate) fn smoke(
         "k8s-canonical evidence requires the future Kubernetes runner"
     );
     let origin = validate_origin(base_url)?;
+    ensure_target_allowed(&origin, allow_remote_target)?;
     let metadata_path = output_dir.join("run.json");
-    anyhow::ensure!(
-        force || !metadata_path.exists(),
-        "{} already exists; pass --force to replace it",
-        metadata_path.display()
-    );
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("create output directory {}", output_dir.display()))?;
+    prepare_output_directory(output_dir, force)?;
 
     let tools = tooling::configuration()?;
-    let local_k6 = tooling::successful_stdout("k6", &["version"]).ok();
-    let mode = if local_k6.is_some() {
+    let local_k6 = tooling::local_k6_version();
+    let local_compatible = tooling::compatible_local_k6(local_k6.as_deref(), &tools.k6.version);
+    let mode = if local_compatible {
         "local"
     } else {
         "container"
@@ -61,7 +66,11 @@ pub(crate) fn smoke(
     let mut dimensions = BTreeMap::from([
         ("vus".to_owned(), "1".to_owned()),
         ("iterations".to_owned(), "10".to_owned()),
-        ("telemetry_mode".to_owned(), "comparable".to_owned()),
+        (
+            "telemetry_mode".to_owned(),
+            telemetry_mode(result_class).to_owned(),
+        ),
+        ("k6_version".to_owned(), tools.k6.version.clone()),
     ]);
     bind_evidence(result_class, stack_input, doctor_report, &mut dimensions)?;
     let mut metadata = RunMetadata {
@@ -101,10 +110,42 @@ pub(crate) fn smoke(
             metadata.exit_code = None;
             metadata.successful = false;
             write_metadata(&metadata_path, &metadata)?;
+            fs::write(output_dir.join("runner.error.log"), format!("{error:#}\n"))
+                .context("write runner error")?;
             return Err(error);
         }
     }
     println!("Smoke evidence written to {}.", output_dir.display());
+    Ok(())
+}
+
+fn telemetry_mode(result_class: &str) -> &'static str {
+    if result_class == "diagnostic" {
+        "diagnostic"
+    } else {
+        "comparable"
+    }
+}
+
+fn prepare_output_directory(output_dir: &Path, force: bool) -> Result<()> {
+    let existing: Vec<_> = RUN_ARTIFACTS
+        .iter()
+        .map(|name| output_dir.join(name))
+        .filter(|path| path.exists())
+        .collect();
+    anyhow::ensure!(
+        force || existing.is_empty(),
+        "{} already contains run artifacts; pass --force to replace them",
+        output_dir.display()
+    );
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output directory {}", output_dir.display()))?;
+    if force {
+        for path in existing {
+            fs::remove_file(&path)
+                .with_context(|| format!("remove stale run artifact {}", path.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -228,9 +269,32 @@ fn validate_origin(value: &str) -> Result<Url> {
     Ok(url)
 }
 
+fn ensure_target_allowed(origin: &Url, allow_remote_target: bool) -> Result<()> {
+    let local = match origin.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(domain)) => {
+            domain.eq_ignore_ascii_case("localhost")
+                || domain.eq_ignore_ascii_case("host.docker.internal")
+        }
+        None => false,
+    };
+    anyhow::ensure!(
+        local || allow_remote_target,
+        "remote targets require --allow-remote-target; never use production traffic or personal data"
+    );
+    Ok(())
+}
+
 fn docker_origin(origin: &Url) -> Result<String> {
+    docker_origin_for_host(origin, std::env::consts::OS)
+}
+
+fn docker_origin_for_host(origin: &Url, host_os: &str) -> Result<String> {
     let mut url = origin.clone();
-    if matches!(url.host_str(), Some("127.0.0.1" | "localhost")) {
+    if matches!(host_os, "windows" | "macos")
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+    {
         url.set_host(Some("host.docker.internal"))
             .context("replace loopback hostname for the k6 container")?;
     }
@@ -280,15 +344,29 @@ mod tests {
     }
 
     #[test]
+    fn remote_targets_require_explicit_authorization() {
+        let remote = validate_origin("https://performance.example.com").expect("remote origin");
+        assert!(ensure_target_allowed(&remote, false).is_err());
+        ensure_target_allowed(&remote, true).expect("explicit remote target");
+
+        let local = validate_origin("http://127.0.0.1:28080").expect("local origin");
+        ensure_target_allowed(&local, false).expect("loopback target");
+    }
+
+    #[test]
     fn loopback_is_rewritten_only_for_container_access() {
         let url = validate_origin("http://127.0.0.1:28000").expect("valid origin");
         assert_eq!(
-            docker_origin(&url).expect("container origin"),
+            docker_origin_for_host(&url, "windows").expect("container origin"),
             "http://host.docker.internal:28000"
+        );
+        assert_eq!(
+            docker_origin_for_host(&url, "linux").expect("Linux host origin"),
+            "http://127.0.0.1:28000"
         );
         let remote = validate_origin("https://perf.example.com").expect("valid origin");
         assert_eq!(
-            docker_origin(&remote).expect("remote origin"),
+            docker_origin_for_host(&remote, "windows").expect("remote origin"),
             "https://perf.example.com"
         );
     }
@@ -308,5 +386,23 @@ mod tests {
         let error = bind_evidence("local-comparable", None, None, &mut dimensions)
             .expect_err("unbound comparison must fail");
         assert!(error.to_string().contains("--stack-input"));
+    }
+
+    #[test]
+    fn force_removes_only_known_stale_run_artifacts() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        fs::write(temporary.path().join("summary.json"), "stale").expect("stale summary");
+        fs::write(temporary.path().join("keep.txt"), "keep").expect("unrelated file");
+
+        assert!(prepare_output_directory(temporary.path(), false).is_err());
+        prepare_output_directory(temporary.path(), true).expect("clean known artifacts");
+        assert!(!temporary.path().join("summary.json").exists());
+        assert!(temporary.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn diagnostic_runs_are_not_labeled_comparable() {
+        assert_eq!(telemetry_mode("diagnostic"), "diagnostic");
+        assert_eq!(telemetry_mode("local-comparable"), "comparable");
     }
 }

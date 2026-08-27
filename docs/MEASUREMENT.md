@@ -40,4 +40,3 @@ A separate no-telemetry control quantifies instrumentation cost.
 Reject or quarantine a run with response-check failures, unexpected runtime
 fallbacks, OOMs, material CPU throttling, thermal instability, uncontrolled
 background load, changed build/topology inputs, or incomplete evidence.
-

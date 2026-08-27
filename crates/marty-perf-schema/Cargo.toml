@@ -12,4 +12,3 @@ serde.workspace = true
 
 [lints]
 workspace = true
-

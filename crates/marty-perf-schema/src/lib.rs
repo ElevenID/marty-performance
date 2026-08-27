@@ -131,8 +131,15 @@ pub struct DockerEvidence {
     pub server_cpus: Option<usize>,
     /// Memory visible to Docker in bytes.
     pub server_memory_bytes: Option<u64>,
-    /// Number of unrelated running containers observed by doctor.
+    /// Total number of running containers observed by doctor.
     pub running_containers: Option<usize>,
+    /// Running containers accepted as part of the declared test environment.
+    pub allowed_running_containers: Option<usize>,
+    /// Running containers outside the declared test environment.
+    pub unrelated_running_containers: Option<usize>,
+    /// Prefixes used to classify intended test containers.
+    #[serde(default)]
+    pub allowed_container_prefixes: Vec<String>,
     /// Diagnostic detail when Docker could not be queried.
     pub error: Option<String>,
 }
@@ -146,6 +153,8 @@ pub struct K6Evidence {
     pub configured_version: String,
     /// Version output for local k6, if installed.
     pub local_version: Option<String>,
+    /// Whether local k6 exactly matches the repository-approved version.
+    pub local_compatible: bool,
     /// Digest-pinned fallback image.
     pub container_image: String,
 }

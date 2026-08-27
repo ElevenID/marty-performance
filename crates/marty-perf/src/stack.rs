@@ -50,7 +50,11 @@ pub(crate) fn prepare(manifest_path: &Path, output_dir: &Path, force: bool) -> R
     let prepared = PreparedStack {
         schema: "marty.performance/stack-input/v1".to_owned(),
         prepared_at: Utc::now().to_rfc3339(),
-        source_manifest: manifest_path.display().to_string(),
+        source_manifest: manifest_path
+            .file_name()
+            .context("stack manifest path must identify a file")?
+            .to_string_lossy()
+            .into_owned(),
         source_manifest_sha256: source_digest,
         release: manifest.release.clone(),
         images: images.clone(),
@@ -318,6 +322,7 @@ mod tests {
         .expect("valid prepared stack");
         assert_eq!(evidence.schema, "marty.performance/stack-input/v1");
         assert_eq!(evidence.release, "marty-ui@1.2.3");
+        assert_eq!(evidence.source_manifest, "stack-manifest.json");
         assert!(is_digest(&evidence.source_manifest_sha256));
     }
 }

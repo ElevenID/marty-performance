@@ -28,11 +28,32 @@ pub(crate) fn configuration() -> Result<ToolConfiguration> {
         "unsupported tool configuration schema {}",
         configuration.schema
     );
+    let (_, digest) = configuration
+        .k6
+        .image
+        .rsplit_once("@sha256:")
+        .context("k6 image must be digest pinned")?;
     anyhow::ensure!(
-        configuration.k6.image.contains("@sha256:"),
-        "k6 image must be digest pinned"
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "k6 image must contain a valid lowercase SHA-256 digest"
     );
     Ok(configuration)
+}
+
+pub(crate) fn local_k6_version() -> Option<String> {
+    successful_stdout("k6", &["version"]).ok()
+}
+
+pub(crate) fn compatible_local_k6(detected: Option<&str>, configured: &str) -> bool {
+    let expected = format!("v{configured}");
+    detected.is_some_and(|value| {
+        value
+            .split(|character: char| character.is_whitespace() || character == ',')
+            .any(|token| token == configured || token == expected)
+    })
 }
 
 pub(crate) fn output(program: &str, args: &[&str]) -> Result<Output> {
@@ -50,4 +71,22 @@ pub(crate) fn successful_stdout(program: &str, args: &[&str]) -> Result<String> 
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_k6_requires_the_configured_version() {
+        assert!(compatible_local_k6(
+            Some("k6.exe v1.3.0 (commit/go1.25)"),
+            "1.3.0"
+        ));
+        assert!(!compatible_local_k6(
+            Some("k6 v1.2.0 (commit/go1.24)"),
+            "1.3.0"
+        ));
+        assert!(!compatible_local_k6(None, "1.3.0"));
+    }
 }

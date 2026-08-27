@@ -69,4 +69,3 @@ the accepted noise envelope.
 
 Exit: a reviewed `k8s-canonical` profile can be reproduced from immutable
 artifacts without using production traffic or personal data.
-

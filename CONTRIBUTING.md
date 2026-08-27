@@ -19,4 +19,3 @@ or raw traces containing identity attributes.
 Performance thresholds are advisory unless a separately reviewed SLO adopts
 them. A pull request must not weaken correctness or run-validity checks to
 obtain a better result.
-

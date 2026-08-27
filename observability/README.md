@@ -18,4 +18,3 @@ Initial metric families will cover:
 Allowed labels are bounded dimensions such as service, operation, route
 template, method, status class, protocol, credential format, and outcome.
 Identity and tenancy identifiers are forbidden.
-

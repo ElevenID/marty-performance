@@ -18,12 +18,16 @@ all k6 checks, and an unbound comparable run is rejected.
 
 ## M2 — Workloads and calibration
 
-- Synthetic organization, trust, template, policy, deployment, applicant, and
-  flow lifecycle fixtures.
-- SD-JWT VC, mdoc, JWT/VC issuance workloads.
-- OID4VP verification, signing, status, and revocation workloads.
-- Calibration, steady load, stress, burst, and soak executors.
-- Deterministic reset and fixture isolation.
+- [x] Versioned workload and execution-profile contracts.
+- [x] Deterministic synthetic organization, trust, template, policy, and
+  deployment fixture.
+- [x] Authenticated management lifecycle reads with reverse-order cleanup.
+- [x] Production-shutdown test-window evidence gate.
+- [ ] Applicant and flow lifecycle fixtures.
+- [ ] SD-JWT VC, mdoc, JWT/VC issuance workloads.
+- [ ] OID4VP verification, signing, status, and revocation workloads.
+- [ ] Calibrated steady load, stress, burst, and soak rates.
+- [ ] Interrupted-run cleanup reconciliation.
 
 Exit: each journey proves correctness at smoke volume and emits stable
 operation tags without identity data.

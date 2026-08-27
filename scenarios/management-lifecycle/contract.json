@@ -1,0 +1,93 @@
+{
+  "schema": "marty.performance/workload/v1",
+  "name": "management-lifecycle",
+  "revision": "v1",
+  "script": "gateway.js",
+  "fixture_schema": "marty.performance/lifecycle-fixture/v1",
+  "operations": [
+    { "name": "organization-create", "method": "POST", "route": "/v1/organizations" },
+    { "name": "organization-get", "method": "GET", "route": "/v1/organizations/{organization_id}" },
+    { "name": "organization-list", "method": "GET", "route": "/v1/organizations" },
+    { "name": "organization-delete", "method": "DELETE", "route": "/v1/organizations/{organization_id}" },
+    { "name": "trust-profile-create", "method": "POST", "route": "/v1/trust-profiles" },
+    { "name": "trust-profile-get", "method": "GET", "route": "/v1/trust-profiles/{trust_profile_id}" },
+    { "name": "trust-profile-list", "method": "GET", "route": "/v1/trust-profiles" },
+    { "name": "trust-profile-delete", "method": "DELETE", "route": "/v1/trust-profiles/{trust_profile_id}" },
+    { "name": "credential-template-create", "method": "POST", "route": "/v1/credential-templates" },
+    { "name": "credential-template-get", "method": "GET", "route": "/v1/credential-templates/{credential_template_id}" },
+    { "name": "credential-template-list", "method": "GET", "route": "/v1/credential-templates" },
+    { "name": "credential-template-delete", "method": "DELETE", "route": "/v1/credential-templates/{credential_template_id}" },
+    { "name": "presentation-policy-create", "method": "POST", "route": "/v1/presentation-policies" },
+    { "name": "presentation-policy-get", "method": "GET", "route": "/v1/presentation-policies/{presentation_policy_id}" },
+    { "name": "presentation-policy-list", "method": "GET", "route": "/v1/presentation-policies" },
+    { "name": "presentation-policy-delete", "method": "DELETE", "route": "/v1/presentation-policies/{presentation_policy_id}" },
+    { "name": "deployment-profile-create", "method": "POST", "route": "/v1/deployment-profiles" },
+    { "name": "deployment-profile-get", "method": "GET", "route": "/v1/deployment-profiles/{deployment_profile_id}" },
+    { "name": "deployment-profile-list", "method": "GET", "route": "/v1/deployment-profiles" },
+    { "name": "deployment-profile-delete", "method": "DELETE", "route": "/v1/deployment-profiles/{deployment_profile_id}" }
+  ],
+  "profiles": {
+    "smoke": {
+      "executor": "per-vu-iterations",
+      "vus": 1,
+      "iterations": 1,
+      "graceful_stop": "30s"
+    },
+    "calibration": {
+      "executor": "ramping-arrival-rate",
+      "start_rate": 1,
+      "time_unit": "1s",
+      "pre_allocated_vus": 8,
+      "max_vus": 100,
+      "stages": [
+        { "duration": "1m", "target": 5 },
+        { "duration": "2m", "target": 20 },
+        { "duration": "2m", "target": 50 },
+        { "duration": "1m", "target": 0 }
+      ],
+      "graceful_stop": "30s"
+    },
+    "steady": {
+      "executor": "constant-arrival-rate",
+      "rate": 10,
+      "time_unit": "1s",
+      "duration": "10m",
+      "pre_allocated_vus": 10,
+      "max_vus": 50,
+      "graceful_stop": "30s"
+    },
+    "stress": {
+      "executor": "ramping-arrival-rate",
+      "start_rate": 1,
+      "time_unit": "1s",
+      "pre_allocated_vus": 10,
+      "max_vus": 200,
+      "stages": [
+        { "duration": "2m", "target": 10 },
+        { "duration": "2m", "target": 25 },
+        { "duration": "2m", "target": 50 },
+        { "duration": "2m", "target": 100 },
+        { "duration": "1m", "target": 0 }
+      ],
+      "graceful_stop": "1m"
+    },
+    "burst": {
+      "executor": "constant-arrival-rate",
+      "rate": 100,
+      "time_unit": "1s",
+      "duration": "1m",
+      "pre_allocated_vus": 25,
+      "max_vus": 200,
+      "graceful_stop": "1m"
+    },
+    "soak": {
+      "executor": "constant-arrival-rate",
+      "rate": 10,
+      "time_unit": "1s",
+      "duration": "2h",
+      "pre_allocated_vus": 10,
+      "max_vus": 50,
+      "graceful_stop": "1m"
+    }
+  }
+}

@@ -35,6 +35,16 @@ throughput comparisons use equal correctness and saturation criteria.
 
 A separate no-telemetry control quantifies instrumentation cost.
 
+## Test window
+
+Contract-defined workloads require a time-bounded attestation that production
+traffic is drained, public ingress is disabled, the authorized target matches
+the requested gateway origin, and only synthetic data will be used. The harness
+validates and binds this evidence but never performs the shutdown itself.
+
+Smoke requests against local mocks do not require a test window. Smoke requests
+against production hardware do.
+
 ## Invalid conditions
 
 Reject or quarantine a run with response-check failures, unexpected runtime

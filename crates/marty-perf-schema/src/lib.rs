@@ -186,3 +186,125 @@ pub struct RunMetadata {
     #[serde(default)]
     pub dimensions: BTreeMap<String, String>,
 }
+
+/// A versioned k6 workload contract and its supported execution profiles.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkloadContract {
+    /// Must be `marty.performance/workload/v1`.
+    pub schema: String,
+    /// Stable low-cardinality workload name.
+    pub name: String,
+    /// Revision changed whenever workload behavior changes.
+    pub revision: String,
+    /// JavaScript entry point relative to the contract file.
+    pub script: String,
+    /// Fixture schema accepted by the workload.
+    pub fixture_schema: String,
+    /// Stable operations emitted by the workload.
+    pub operations: Vec<OperationContract>,
+    /// Named execution profiles.
+    pub profiles: BTreeMap<String, ExecutionProfile>,
+}
+
+/// A stable HTTP operation represented in workload evidence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OperationContract {
+    /// Low-cardinality operation tag.
+    pub name: String,
+    /// HTTP method.
+    pub method: String,
+    /// Route template without concrete resource identifiers.
+    pub route: String,
+}
+
+/// One k6 scenario executor configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExecutionProfile {
+    /// Supported k6 executor name.
+    pub executor: String,
+    /// Fixed virtual users for per-VU iteration profiles.
+    #[serde(default)]
+    pub vus: Option<u32>,
+    /// Iterations performed by each virtual user.
+    #[serde(default)]
+    pub iterations: Option<u64>,
+    /// Initial arrival rate for ramping profiles.
+    #[serde(default)]
+    pub start_rate: Option<u64>,
+    /// Fixed arrival rate for constant profiles.
+    #[serde(default)]
+    pub rate: Option<u64>,
+    /// Unit used by an arrival-rate executor.
+    #[serde(default)]
+    pub time_unit: Option<String>,
+    /// Execution duration for fixed profiles.
+    #[serde(default)]
+    pub duration: Option<String>,
+    /// Initial VU pool for arrival-rate profiles.
+    #[serde(default)]
+    pub pre_allocated_vus: Option<u32>,
+    /// Maximum VU pool for arrival-rate profiles.
+    #[serde(default)]
+    pub max_vus: Option<u32>,
+    /// Ramping arrival-rate stages.
+    #[serde(default)]
+    pub stages: Vec<ExecutionStage>,
+    /// Maximum time allowed for iterations to finish.
+    #[serde(default)]
+    pub graceful_stop: Option<String>,
+}
+
+/// One target and duration in a ramping execution profile.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExecutionStage {
+    /// Stage duration in k6 duration syntax.
+    pub duration: String,
+    /// Target iterations per configured time unit.
+    pub target: u64,
+}
+
+/// Deterministic synthetic inputs used to seed the management lifecycle.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LifecycleFixture {
+    /// Must be `marty.performance/lifecycle-fixture/v1`.
+    pub schema: String,
+    /// Caller-selected deterministic seed.
+    pub seed: String,
+    /// Stable suffix derived from the seed.
+    pub suffix: String,
+    /// Synthetic organization name.
+    pub organization_name: String,
+    /// Synthetic organization display name.
+    pub organization_display_name: String,
+    /// Synthetic trust-profile name.
+    pub trust_profile_name: String,
+    /// Synthetic credential-template name.
+    pub credential_template_name: String,
+    /// Synthetic presentation-policy name.
+    pub presentation_policy_name: String,
+    /// Synthetic deployment-profile name.
+    pub deployment_profile_name: String,
+    /// Synthetic deployment site identifier.
+    pub site_id: String,
+}
+
+/// Human-provided proof that a safe performance test window is active.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TestWindowAttestation {
+    /// Must be `marty.performance/test-window/v1`.
+    pub schema: String,
+    /// Normalized gateway origin authorized for the test.
+    pub target_origin: String,
+    /// RFC 3339 start of the authorized test window.
+    pub starts_at: String,
+    /// RFC 3339 end of the authorized test window.
+    pub expires_at: String,
+    /// Non-secret change or incident reference.
+    pub change_reference: String,
+    /// Production traffic has been drained from the stack hardware.
+    pub production_traffic_drained: bool,
+    /// Public ingress is disabled while synthetic testing is active.
+    pub public_ingress_disabled: bool,
+    /// Only synthetic data and identities will be used.
+    pub synthetic_data_only: bool,
+}

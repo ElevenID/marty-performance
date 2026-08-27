@@ -1,0 +1,10 @@
+{
+  "schema": "marty.performance/test-window/v1",
+  "target_origin": "https://replace-with-authorized-gateway.example",
+  "starts_at": "2000-01-01T00:00:00Z",
+  "expires_at": "2000-01-01T01:00:00Z",
+  "change_reference": "replace-with-approved-change-reference",
+  "production_traffic_drained": false,
+  "public_ingress_disabled": false,
+  "synthetic_data_only": false
+}

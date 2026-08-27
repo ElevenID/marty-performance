@@ -2,7 +2,9 @@
 /.idea/
 /.vscode/
 /.env.stack
+/.secrets/
 /reports/*
 !/reports/.gitkeep
+*.session-id
 *.profraw
 perf.data*

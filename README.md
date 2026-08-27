@@ -16,6 +16,10 @@ The foundation milestone provides:
   rendering digest-only Compose inputs;
 - `marty-perf run smoke` for correctness-checked gateway health and readiness
   requests using k6;
+- versioned workload contracts with smoke, calibration, steady, stress, burst,
+  and soak execution profiles;
+- deterministic Rust-generated lifecycle fixtures and an authenticated
+  management-plane workload;
 - stable JSON artifacts suitable for later comparison and publication.
 
 Broader lifecycle, issuance, verification, stress, burst, and soak scenarios
@@ -77,6 +81,42 @@ prefix must contain at least four safe container-name characters.
 The runner accepts loopback targets by default. An isolated remote test cluster
 requires the explicit `--allow-remote-target` flag. That flag does not permit
 production traffic or production personal data.
+
+## Management lifecycle workload
+
+Validate the versioned workload and generate a deterministic synthetic fixture:
+
+```console
+cargo run -p marty-perf -- scenario validate \
+  --contract scenarios/management-lifecycle/contract.json
+cargo run -p marty-perf -- fixture generate \
+  --seed campaign-001 \
+  --output reports/fixtures/management-lifecycle.json
+```
+
+The workload seeds one organization, trust profile, credential template,
+presentation policy, and deployment profile through the gateway. Its measured
+phase performs authenticated reads with fixed operation tags; teardown removes
+the seeded resources in reverse order. The session ID is read from an ignored
+file and is never copied into evidence or command arguments.
+
+Every workload run requires an active test-window attestation. Create it only
+after production traffic has been drained and public ingress has been disabled,
+then run:
+
+```console
+cargo run -p marty-perf -- run workload \
+  --contract scenarios/management-lifecycle/contract.json \
+  --profile smoke \
+  --fixture reports/fixtures/management-lifecycle.json \
+  --session-file .secrets/gateway.session-id \
+  --base-url http://127.0.0.1:28000 \
+  --target-environment production \
+  --test-window reports/test-window.json
+```
+
+See `docs/TEST-WINDOW.md` for the operational gate. The supplied load profile
+rates are starting points for calibration, not capacity claims or service SLOs.
 
 `stack prepare` requires exactly one image for each public stack role:
 `ui`, `services`, `migrations`, and `marty-credentials-issuance`. Mutable OCI

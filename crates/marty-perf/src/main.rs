@@ -1,6 +1,8 @@
 //! Command-line entry point for reproducible Marty performance runs.
 
+mod contract;
 mod doctor;
+mod fixture;
 mod runner;
 mod stack;
 mod tooling;
@@ -8,7 +10,7 @@ mod tooling;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "marty-perf", version, about)]
@@ -23,8 +25,12 @@ enum Command {
     Doctor(DoctorArgs),
     /// Work with immutable Marty stack inputs.
     Stack(StackArgs),
+    /// Work with deterministic synthetic fixtures.
+    Fixture(FixtureArgs),
+    /// Validate workload definitions without executing them.
+    Scenario(ScenarioArgs),
     /// Execute a performance scenario.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -78,6 +84,28 @@ struct RunArgs {
 enum RunCommand {
     /// Verify gateway health and full-stack readiness with a small k6 run.
     Smoke(SmokeArgs),
+    /// Execute a contract-defined authenticated workload.
+    Workload(WorkloadArgs),
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TargetEnvironment {
+    /// Loopback development or mock target.
+    Local,
+    /// Isolated non-production performance environment.
+    IsolatedTest,
+    /// Production hardware in an approved drained test window.
+    Production,
+}
+
+impl TargetEnvironment {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::IsolatedTest => "isolated-test",
+            Self::Production => "production",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -100,9 +128,102 @@ struct SmokeArgs {
     /// Explicitly permit a non-loopback target such as an isolated test cluster.
     #[arg(long)]
     allow_remote_target: bool,
+    /// Declared target environment.
+    #[arg(long, value_enum, default_value = "local")]
+    target_environment: TargetEnvironment,
+    /// Required test-window evidence when smoke targets production hardware.
+    #[arg(long)]
+    test_window: Option<PathBuf>,
     /// Remove and replace known run artifacts in the output directory.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct WorkloadArgs {
+    /// Versioned workload contract JSON.
+    #[arg(long)]
+    contract: PathBuf,
+    /// Named execution profile from the workload contract.
+    #[arg(long)]
+    profile: String,
+    /// Deterministic synthetic lifecycle fixture JSON.
+    #[arg(long)]
+    fixture: PathBuf,
+    /// File containing only a valid gateway session ID; never retained in evidence.
+    #[arg(long)]
+    session_file: PathBuf,
+    /// Gateway origin, without credentials, query, or fragment.
+    #[arg(long)]
+    base_url: String,
+    /// Directory for metadata, samples, logs, and the k6 summary.
+    #[arg(long, default_value = "reports/workload")]
+    output_dir: PathBuf,
+    /// Result classification retained in metadata.
+    #[arg(long, default_value = "migration-preview")]
+    result_class: String,
+    /// Prepared `stack-input.json` to bind into run provenance.
+    #[arg(long)]
+    stack_input: Option<PathBuf>,
+    /// `doctor.json` used to qualify non-preview runs.
+    #[arg(long)]
+    doctor_report: Option<PathBuf>,
+    /// Declared target environment.
+    #[arg(long, value_enum)]
+    target_environment: TargetEnvironment,
+    /// Time-bounded proof that production traffic and ingress are disabled.
+    #[arg(long)]
+    test_window: PathBuf,
+    /// Explicitly permit a non-loopback target such as isolated production hardware.
+    #[arg(long)]
+    allow_remote_target: bool,
+    /// Remove and replace known run artifacts in the output directory.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct FixtureArgs {
+    #[command(subcommand)]
+    command: FixtureCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum FixtureCommand {
+    /// Generate a deterministic synthetic management-lifecycle fixture.
+    Generate(FixtureGenerateArgs),
+}
+
+#[derive(Debug, Args)]
+struct FixtureGenerateArgs {
+    /// Stable non-personal campaign seed.
+    #[arg(long)]
+    seed: String,
+    /// Fixture JSON destination.
+    #[arg(long, default_value = "reports/fixtures/management-lifecycle.json")]
+    output: PathBuf,
+    /// Replace an existing fixture file.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScenarioArgs {
+    #[command(subcommand)]
+    command: ScenarioCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ScenarioCommand {
+    /// Validate a workload contract and its referenced script.
+    Validate(ScenarioValidateArgs),
+}
+
+#[derive(Debug, Args)]
+struct ScenarioValidateArgs {
+    /// Versioned workload contract JSON.
+    #[arg(long)]
+    contract: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -118,16 +239,50 @@ fn main() -> Result<()> {
                 stack::prepare(&args.manifest, &args.output_dir, args.force)
             }
         },
+        Command::Fixture(args) => match args.command {
+            FixtureCommand::Generate(args) => {
+                fixture::generate(&args.seed, &args.output, args.force)
+            }
+        },
+        Command::Scenario(args) => match args.command {
+            ScenarioCommand::Validate(args) => {
+                let resolved = contract::load(&args.contract)?;
+                println!(
+                    "Validated {} revision {} with {} profiles.",
+                    resolved.contract.name,
+                    resolved.contract.revision,
+                    resolved.contract.profiles.len()
+                );
+                Ok(())
+            }
+        },
         Command::Run(args) => match args.command {
-            RunCommand::Smoke(args) => runner::smoke(
-                &args.base_url,
-                &args.output_dir,
-                &args.result_class,
-                args.stack_input.as_deref(),
-                args.doctor_report.as_deref(),
-                args.allow_remote_target,
-                args.force,
-            ),
+            RunCommand::Smoke(args) => runner::smoke(&runner::SmokeRun {
+                base_url: &args.base_url,
+                output_dir: &args.output_dir,
+                result_class: &args.result_class,
+                stack_input: args.stack_input.as_deref(),
+                doctor_report: args.doctor_report.as_deref(),
+                allow_remote_target: args.allow_remote_target,
+                target_environment: args.target_environment.as_str(),
+                test_window: args.test_window.as_deref(),
+                force: args.force,
+            }),
+            RunCommand::Workload(args) => runner::workload(&runner::WorkloadRun {
+                contract_path: &args.contract,
+                profile_name: &args.profile,
+                fixture_path: &args.fixture,
+                session_file: &args.session_file,
+                base_url: &args.base_url,
+                output_dir: &args.output_dir,
+                result_class: &args.result_class,
+                stack_input: args.stack_input.as_deref(),
+                doctor_report: args.doctor_report.as_deref(),
+                target_environment: args.target_environment.as_str(),
+                test_window: &args.test_window,
+                allow_remote_target: args.allow_remote_target,
+                force: args.force,
+            }),
         },
     }
 }

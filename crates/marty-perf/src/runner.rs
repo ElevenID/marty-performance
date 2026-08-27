@@ -182,7 +182,13 @@ pub(crate) fn workload(settings: &WorkloadRun<'_>) -> Result<()> {
         .profiles
         .get(settings.profile_name)
         .with_context(|| format!("unknown workload profile {}", settings.profile_name))?;
-    let profile_json = serde_json::to_string(profile).context("serialize workload profile")?;
+    let workload_json = serde_json::to_string(&serde_json::json!({
+        "name": resolved.contract.name,
+        "revision": resolved.contract.revision,
+        "operations": resolved.contract.operations,
+        "profile": profile,
+    }))
+    .context("serialize workload binding")?;
     let (fixture, fixture_digest) = fixture::load(settings.fixture_path)?;
     anyhow::ensure!(
         resolved.contract.fixture_schema == fixture.schema,
@@ -232,7 +238,7 @@ pub(crate) fn workload(settings: &WorkloadRun<'_>) -> Result<()> {
             &resolved.script,
             settings.fixture_path,
             settings.session_file,
-            &profile_json,
+            &workload_json,
         )
     } else {
         run_container_workload(
@@ -241,7 +247,7 @@ pub(crate) fn workload(settings: &WorkloadRun<'_>) -> Result<()> {
             &resolved.script,
             settings.fixture_path,
             settings.session_file,
-            &profile_json,
+            &workload_json,
             &tools.k6.image,
         )
     };
@@ -563,7 +569,7 @@ fn run_local_workload(
     script: &Path,
     fixture_path: &Path,
     session_file: &Path,
-    profile_json: &str,
+    workload_json: &str,
 ) -> Result<Output> {
     let summary = absolute_output(&output_dir.join("summary.json"))?;
     let samples = absolute_output(&output_dir.join("samples.json"))?;
@@ -576,7 +582,7 @@ fn run_local_workload(
             &format!("json={}", samples.display()),
         ])
         .env("BASE_URL", normalized_origin(origin))
-        .env("MARTY_PROFILE_JSON", profile_json)
+        .env("MARTY_WORKLOAD_JSON", workload_json)
         .env("FIXTURE_FILE", canonical_unicode(fixture_path)?)
         .env("SESSION_FILE", canonical_unicode(session_file)?)
         .arg(script)
@@ -591,7 +597,7 @@ fn run_container_workload(
     script: &Path,
     fixture_path: &Path,
     session_file: &Path,
-    profile_json: &str,
+    workload_json: &str,
     image: &str,
 ) -> Result<Output> {
     tooling::successful_stdout("docker", &["version", "--format", "{{.Server.Version}}"])
@@ -609,10 +615,12 @@ fn run_container_workload(
         .canonicalize()
         .context("canonicalize session file")?;
     let container_origin = docker_origin(origin)?;
-    Command::new("docker")
+    let mut command = Command::new("docker");
+    command
+        .env("MARTY_WORKLOAD_JSON", workload_json)
         .args(["run", "--rm", "--network", "host"])
         .args(["--env", &format!("BASE_URL={container_origin}")])
-        .args(["--env", &format!("MARTY_PROFILE_JSON={profile_json}")])
+        .args(["--env", "MARTY_WORKLOAD_JSON"])
         .args(["--env", "FIXTURE_FILE=/fixtures/lifecycle.json"])
         .args(["--env", "SESSION_FILE=/run/secrets/session-id"])
         .args([
@@ -645,9 +653,8 @@ fn run_container_workload(
             "--out",
             "json=/results/samples.json",
             &format!("/scripts/{script_name}"),
-        ])
-        .output()
-        .context("execute k6 workload container")
+        ]);
+    command.output().context("execute k6 workload container")
 }
 
 fn finish_run(

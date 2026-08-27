@@ -138,6 +138,16 @@ fn validate_profile(name: &str, profile: &ExecutionProfile) -> Result<()> {
                     && profile.iterations.is_some_and(|value| value > 0),
                 "profile {name} requires positive vus and iterations"
             );
+            anyhow::ensure!(
+                profile.start_rate.is_none()
+                    && profile.rate.is_none()
+                    && profile.time_unit.is_none()
+                    && profile.duration.is_none()
+                    && profile.pre_allocated_vus.is_none()
+                    && profile.max_vus.is_none()
+                    && profile.stages.is_empty(),
+                "profile {name} contains fields that per-vu-iterations ignores"
+            );
         }
         "constant-arrival-rate" => {
             validate_arrival_pool(name, profile)?;
@@ -152,6 +162,13 @@ fn validate_profile(name: &str, profile: &ExecutionProfile) -> Result<()> {
                     .context("constant profile duration is required")?,
             )
             .with_context(|| format!("profile {name} duration"))?;
+            anyhow::ensure!(
+                profile.vus.is_none()
+                    && profile.iterations.is_none()
+                    && profile.start_rate.is_none()
+                    && profile.stages.is_empty(),
+                "profile {name} contains fields that constant-arrival-rate ignores"
+            );
         }
         "ramping-arrival-rate" => {
             validate_arrival_pool(name, profile)?;
@@ -160,10 +177,21 @@ fn validate_profile(name: &str, profile: &ExecutionProfile) -> Result<()> {
                 "profile {name} requires start_rate"
             );
             anyhow::ensure!(!profile.stages.is_empty(), "profile {name} requires stages");
+            anyhow::ensure!(
+                profile.stages.iter().any(|stage| stage.target > 0),
+                "profile {name} must contain a positive stage target"
+            );
             for stage in &profile.stages {
                 validate_duration(&stage.duration)
                     .with_context(|| format!("profile {name} stage duration"))?;
             }
+            anyhow::ensure!(
+                profile.vus.is_none()
+                    && profile.iterations.is_none()
+                    && profile.rate.is_none()
+                    && profile.duration.is_none(),
+                "profile {name} contains fields that ramping-arrival-rate ignores"
+            );
         }
         _ => unreachable!("executor was checked above"),
     }
@@ -291,6 +319,25 @@ mod tests {
             .get_mut("stress")
             .expect("profile")
             .pre_allocated_vus = Some(10);
+        assert!(validate(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_executor_fields_that_k6_would_silently_ignore() {
+        let mut value = contract();
+        value.profiles.get_mut("smoke").expect("profile").rate = Some(10);
+        assert!(validate(&value).is_err());
+
+        let mut value = contract();
+        let profile = value.profiles.get_mut("stress").expect("profile");
+        profile.rate = Some(10);
+        assert!(validate(&value).is_err());
+
+        let mut value = contract();
+        let profile = value.profiles.get_mut("stress").expect("profile");
+        for stage in &mut profile.stages {
+            stage.target = 0;
+        }
         assert!(validate(&value).is_err());
     }
 

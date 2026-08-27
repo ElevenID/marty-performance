@@ -4,7 +4,28 @@ import { check, fail } from "k6";
 const baseUrl = __ENV.BASE_URL;
 const fixture = JSON.parse(open(__ENV.FIXTURE_FILE));
 const sessionId = open(__ENV.SESSION_FILE).trim();
-const profile = JSON.parse(__ENV.MARTY_PROFILE_JSON);
+const workload = JSON.parse(__ENV.MARTY_WORKLOAD_JSON);
+const profile = workload.profile;
+const operations = new Map(workload.operations.map((operation) => [operation.name, operation]));
+
+function routePattern(route) {
+  const escaped = route
+    .split(/(\{[a-z0-9_]+\})/g)
+    .map((part) => /^\{[a-z0-9_]+\}$/.test(part)
+      ? "[^/?#]+"
+      : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("");
+  return new RegExp(`^${escaped}$`);
+}
+
+function assertContractOperation(method, path, operationName) {
+  const operation = operations.get(operationName);
+  if (!operation) throw new Error(`undeclared workload operation: ${operationName}`);
+  const pathname = path.split("?", 1)[0];
+  if (operation.method !== method || !routePattern(operation.route).test(pathname)) {
+    throw new Error(`workload operation ${operationName} does not match its ${operation.method} ${operation.route} contract`);
+  }
+}
 
 function scenarioFromProfile(value) {
   const scenario = {
@@ -43,8 +64,8 @@ export const options = {
   },
   tags: {
     suite: "marty-performance",
-    workload: "management-lifecycle",
-    workload_revision: "v1",
+    workload: workload.name,
+    workload_revision: workload.revision,
   },
 };
 
@@ -54,6 +75,7 @@ const headers = {
 };
 
 function request(method, path, body, operation, expectedStatuses) {
+  assertContractOperation(method, path, operation);
   const response = http.request(method, `${baseUrl}${path}`, body === null ? null : JSON.stringify(body), {
     headers,
     tags: { name: operation, operation },

@@ -47,11 +47,13 @@ pre-analysis protocol before building or timing:
 
 The plan command rejects changed matrix cardinality, route or estimator
 versions, noncanonical bytes, activated production thresholds, reused
-benchmark IDs, and an existing output. The v1 plan fixes two independent
+benchmark IDs, and an existing output. The v2 plan fixes two independent
 45-minute quiet windows, one same-HEAD executable, 20 eight-process
 superblocks per paired cell, the Criterion process arguments, and the
-whole-superblock simultaneous bootstrap. It describes 10,560 fresh timing
-processes but does not execute them or activate a production threshold.
+whole-superblock simultaneous bootstrap. Its discovery gates use the exact
+relative-percent transform `100.0 * (exp(effect) - 1.0)`. It describes 10,560
+fresh timing processes but does not execute them or activate a production
+threshold. Frozen v1 evidence must not be reinterpreted as v2.
 
 ## Test window
 

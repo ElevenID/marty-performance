@@ -143,8 +143,9 @@ fn validate_canonical_json_bytes(bytes: &[u8]) -> Result<()> {
 
 fn validate_manifest(manifest: &SdJwtIssuanceQualificationManifest) -> Result<()> {
     validate_manifest_contract(manifest)?;
-    validate_cases(manifest)?;
-    validate_paired_matrix(manifest)
+    let expected_cases = expected_qualification_cases();
+    validate_cases(manifest, &expected_cases)?;
+    validate_paired_matrix(manifest, &expected_cases)
 }
 
 fn validate_manifest_contract(manifest: &SdJwtIssuanceQualificationManifest) -> Result<()> {
@@ -202,9 +203,63 @@ fn validate_manifest_contract(manifest: &SdJwtIssuanceQualificationManifest) -> 
     Ok(())
 }
 
-fn validate_cases(manifest: &SdJwtIssuanceQualificationManifest) -> Result<()> {
+#[derive(Debug)]
+struct ExpectedQualificationCase {
+    fixture_id: String,
+    disclosure_count: usize,
+    benchmark_suffix: String,
+}
+
+fn expected_qualification_cases() -> Vec<ExpectedQualificationCase> {
+    const DISCLOSURE_COUNTS: [usize; 5] = [1, 8, 32, 128, 512];
+    const CORE_PAYLOADS: [(&str, &str); 4] = [
+        ("small", "s"),
+        ("medium_nested", "mn"),
+        ("large_64_kib", "l64"),
+        ("mixed_nested", "mx"),
+    ];
+    const DECOY_PAYLOADS: [(&str, &str); 2] = [("small", "s"), ("mixed_nested", "mx")];
+
+    let mut cases = Vec::with_capacity(FIXTURE_CASE_COUNT);
+    for (payload_label, payload_code) in CORE_PAYLOADS {
+        for disclosure_count in DISCLOSURE_COUNTS {
+            cases.push(ExpectedQualificationCase {
+                fixture_id: format!("payload_{payload_label}__decoys_off__n_{disclosure_count:04}"),
+                disclosure_count,
+                benchmark_suffix: format!("p_{payload_code}__d_0__n_{disclosure_count:04}"),
+            });
+        }
+    }
+    for (payload_label, payload_code) in DECOY_PAYLOADS {
+        for disclosure_count in DISCLOSURE_COUNTS {
+            cases.push(ExpectedQualificationCase {
+                fixture_id: format!("payload_{payload_label}__decoys_on__n_{disclosure_count:04}"),
+                disclosure_count,
+                benchmark_suffix: format!("p_{payload_code}__d_1__n_{disclosure_count:04}"),
+            });
+        }
+    }
+    for (fixture_id, disclosure_count) in [
+        ("al_nested_obj_n0007", 7),
+        ("al_array_dag_n0008", 8),
+        ("tl_imbalanced_n0008", 8),
+    ] {
+        cases.push(ExpectedQualificationCase {
+            fixture_id: fixture_id.to_owned(),
+            disclosure_count,
+            benchmark_suffix: format!("f_{fixture_id}"),
+        });
+    }
+    debug_assert_eq!(cases.len(), FIXTURE_CASE_COUNT);
+    cases
+}
+
+fn validate_cases(
+    manifest: &SdJwtIssuanceQualificationManifest,
+    expected_cases: &[ExpectedQualificationCase],
+) -> Result<()> {
     let mut fixture_ids = BTreeSet::new();
-    for case in &manifest.cases {
+    for (case, expected) in manifest.cases.iter().zip(expected_cases) {
         anyhow::ensure!(
             valid_identifier(&case.fixture_id),
             "invalid qualification fixture identifier"
@@ -217,11 +272,19 @@ fn validate_cases(manifest: &SdJwtIssuanceQualificationManifest) -> Result<()> {
             (1..=512).contains(&case.disclosure_count),
             "fixture disclosure count is outside the qualification matrix"
         );
+        anyhow::ensure!(
+            case.fixture_id == expected.fixture_id
+                && case.disclosure_count == expected.disclosure_count,
+            "qualification cases do not match the exact frozen matrix"
+        );
     }
     Ok(())
 }
 
-fn validate_paired_matrix(manifest: &SdJwtIssuanceQualificationManifest) -> Result<()> {
+fn validate_paired_matrix(
+    manifest: &SdJwtIssuanceQualificationManifest,
+    expected_cases: &[ExpectedQualificationCase],
+) -> Result<()> {
     let criterion_prefix = format!("{}/", manifest.benchmark_group_id);
     let mut criterion_ids = BTreeSet::new();
     for id in &manifest.criterion_ids {
@@ -236,21 +299,34 @@ fn validate_paired_matrix(manifest: &SdJwtIssuanceQualificationManifest) -> Resu
     }
 
     let mut paired_ids = BTreeSet::new();
-    for (case_ordinal, case) in manifest.cases.iter().enumerate() {
+    for (case_ordinal, (case, expected_case)) in
+        manifest.cases.iter().zip(expected_cases).enumerate()
+    {
         for (stage_ordinal, expected_stage) in ["executor_assembly", "full_issuance"]
             .into_iter()
             .enumerate()
         {
             let cell = &manifest.paired_cells[case_ordinal * 2 + stage_ordinal];
+            let stage_code = if expected_stage == "executor_assembly" {
+                "ea"
+            } else {
+                "fi"
+            };
+            let expected_serial_id = format!(
+                "{}/v2__s_{stage_code}__r_so__{}",
+                manifest.benchmark_group_id, expected_case.benchmark_suffix
+            );
+            let expected_adaptive_id = format!(
+                "{}/v2__s_{stage_code}__r_ac__{}",
+                manifest.benchmark_group_id, expected_case.benchmark_suffix
+            );
             anyhow::ensure!(
                 cell.fixture_id == case.fixture_id && cell.stage == expected_stage,
                 "paired cells must follow case order and executor/full stage order"
             );
             anyhow::ensure!(
-                cell.serial_id.contains("__r_so__")
-                    && cell.adaptive_id.contains("__r_ac__")
-                    && cell.serial_id != cell.adaptive_id,
-                "paired cell route identities are invalid"
+                cell.serial_id == expected_serial_id && cell.adaptive_id == expected_adaptive_id,
+                "paired cell Criterion IDs do not exactly encode their fixture, stage, and route"
             );
             anyhow::ensure!(
                 criterion_ids.contains(cell.serial_id.as_str())
@@ -306,6 +382,13 @@ fn plan_for_manifest(
     manifest_bytes: &[u8],
 ) -> Result<SdJwtIssuanceQualificationPlan> {
     validate_manifest(manifest)?;
+    let mut canonical_manifest_bytes = serde_json::to_vec_pretty(manifest)
+        .context("serialize canonical qualification manifest for plan binding")?;
+    canonical_manifest_bytes.push(b'\n');
+    anyhow::ensure!(
+        manifest_bytes == canonical_manifest_bytes,
+        "qualification manifest value and bound bytes differ"
+    );
     let manifest_byte_length =
         u64::try_from(manifest_bytes.len()).context("manifest byte length overflow")?;
     let superblocks_per_cell =
@@ -401,67 +484,15 @@ fn validate_plan_schema(plan: &SdJwtIssuanceQualificationPlan) -> Result<()> {
 mod tests {
     use std::fs;
 
-    use marty_perf_schema::{
-        SdJwtIssuanceQualificationCase, SdJwtIssuanceQualificationCell, SdJwtIssuanceThresholds,
-    };
+    use marty_perf_schema::SdJwtIssuanceThresholds;
 
     use super::*;
 
+    const REAL_EMITTED_MANIFEST: &[u8] =
+        include_bytes!("../tests/fixtures/sd-jwt-issuance-qualification-manifest-v1.json");
+
     fn manifest() -> SdJwtIssuanceQualificationManifest {
-        let cases = (0..FIXTURE_CASE_COUNT)
-            .map(|ordinal| SdJwtIssuanceQualificationCase {
-                fixture_id: format!("fixture_{ordinal:02}"),
-                disclosure_count: 1 + ordinal,
-            })
-            .collect::<Vec<_>>();
-        let mut criterion_ids = Vec::with_capacity(BENCHMARK_ID_COUNT);
-        let mut paired_cells = Vec::with_capacity(PAIRED_CELL_COUNT);
-        for case in &cases {
-            let executor_serial = format!("sd_jwt_issuance/v2__s_ea__r_so__f_{}", case.fixture_id);
-            let full_serial = format!("sd_jwt_issuance/v2__s_fi__r_so__f_{}", case.fixture_id);
-            let executor_adaptive =
-                format!("sd_jwt_issuance/v2__s_ea__r_ac__f_{}", case.fixture_id);
-            let full_adaptive = format!("sd_jwt_issuance/v2__s_fi__r_ac__f_{}", case.fixture_id);
-            criterion_ids.extend([
-                executor_serial.clone(),
-                full_serial.clone(),
-                executor_adaptive.clone(),
-                full_adaptive.clone(),
-            ]);
-            paired_cells.extend([
-                SdJwtIssuanceQualificationCell {
-                    fixture_id: case.fixture_id.clone(),
-                    stage: "executor_assembly".to_owned(),
-                    serial_id: executor_serial,
-                    adaptive_id: executor_adaptive,
-                },
-                SdJwtIssuanceQualificationCell {
-                    fixture_id: case.fixture_id.clone(),
-                    stage: "full_issuance".to_owned(),
-                    serial_id: full_serial,
-                    adaptive_id: full_adaptive,
-                },
-            ]);
-        }
-        SdJwtIssuanceQualificationManifest {
-            schema: MANIFEST_SCHEMA.to_owned(),
-            benchmark_group_id: BENCHMARK_GROUP_ID.to_owned(),
-            fixture_case_count: FIXTURE_CASE_COUNT,
-            benchmark_id_count: BENCHMARK_ID_COUNT,
-            paired_cell_count: PAIRED_CELL_COUNT,
-            cases,
-            criterion_ids,
-            paired_cells,
-            route_schema: ROUTE_SCHEMA.to_owned(),
-            work_estimator_version: WORK_ESTIMATOR_VERSION.to_owned(),
-            static_partition_rule_version: STATIC_PARTITION_RULE_VERSION.to_owned(),
-            worker_cap: 4,
-            mechanical_benchmark_thresholds: SdJwtIssuanceThresholds {
-                min_jobs: 2,
-                min_estimated_work_bytes: 1,
-            },
-            qualified_issuance_thresholds: None,
-        }
+        serde_json::from_slice(REAL_EMITTED_MANIFEST).expect("real emitted manifest JSON")
     }
 
     fn canonical_manifest_bytes(value: &SdJwtIssuanceQualificationManifest) -> Vec<u8> {
@@ -561,6 +592,32 @@ mod tests {
     }
 
     #[test]
+    fn real_emitted_manifest_is_accepted_with_all_id_grammars() {
+        validate_canonical_json_bytes(REAL_EMITTED_MANIFEST)
+            .expect("real manifest canonical bytes");
+        let value = manifest();
+        validate_manifest(&value).expect("real emitted manifest contract");
+        assert_eq!(
+            value.paired_cells[0].serial_id,
+            "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0001"
+        );
+        assert_eq!(
+            value.paired_cells[40].adaptive_id,
+            "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0001"
+        );
+        assert_eq!(
+            value.paired_cells[60].serial_id,
+            "sd_jwt_issuance/v2__s_ea__r_so__f_al_nested_obj_n0007"
+        );
+        assert_eq!(
+            hex::encode_upper(Sha256::digest(REAL_EMITTED_MANIFEST)),
+            "04EFEB5E52EF19A0278383F9FD8C574F0B0F24941CD5FCD764696A6E496EDC1F"
+        );
+        plan_for_manifest(&value, REAL_EMITTED_MANIFEST)
+            .expect("real manifest must bind into a plan");
+    }
+
+    #[test]
     fn manifest_validation_rejects_activation_drift_and_identity_gaps() {
         let mut activated = manifest();
         activated.qualified_issuance_thresholds = Some(SdJwtIssuanceThresholds {
@@ -580,6 +637,42 @@ mod tests {
         let mut registration_order = manifest();
         registration_order.criterion_ids.swap(0, 1);
         assert!(validate_manifest(&registration_order).is_err());
+
+        let mut wrong_stage_identity = manifest();
+        let wrong_id = "sd_jwt_issuance/v2__s_xx__r_so__p_s__d_0__n_0001".to_owned();
+        wrong_stage_identity.paired_cells[0].serial_id = wrong_id.clone();
+        wrong_stage_identity.criterion_ids[0] = wrong_id;
+        assert!(validate_manifest(&wrong_stage_identity).is_err());
+
+        let mut wrong_fixture_identity = manifest();
+        let wrong_id = "sd_jwt_issuance/v2__s_ea__r_so__f_fixture_99".to_owned();
+        wrong_fixture_identity.paired_cells[60].serial_id = wrong_id.clone();
+        wrong_fixture_identity.criterion_ids[120] = wrong_id;
+        assert!(validate_manifest(&wrong_fixture_identity).is_err());
+
+        let mut wrong_route_identity = manifest();
+        let wrong_id = "sd_jwt_issuance/v2__s_ea__r_xx__p_s__d_0__n_0001".to_owned();
+        wrong_route_identity.paired_cells[0].serial_id = wrong_id.clone();
+        wrong_route_identity.criterion_ids[0] = wrong_id;
+        assert!(validate_manifest(&wrong_route_identity).is_err());
+
+        let mut mismatched_count = manifest();
+        mismatched_count.cases[0].disclosure_count = 8;
+        assert!(validate_manifest(&mismatched_count).is_err());
+    }
+
+    #[test]
+    fn plan_binding_rejects_manifest_value_and_byte_mismatch() {
+        let value = manifest();
+        let mut different_value = value.clone();
+        different_value.worker_cap = 3;
+        let different_bytes = canonical_manifest_bytes(&different_value);
+
+        let error = plan_for_manifest(&value, &different_bytes)
+            .expect_err("manifest value must match its bound bytes");
+        assert!(error
+            .to_string()
+            .contains("manifest value and bound bytes differ"));
     }
 
     #[test]

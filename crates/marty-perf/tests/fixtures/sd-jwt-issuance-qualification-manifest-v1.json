@@ -1,0 +1,682 @@
+{
+  "schema": "sd_jwt_issuance_qualification_manifest_v1",
+  "benchmark_group_id": "sd_jwt_issuance",
+  "fixture_case_count": 33,
+  "benchmark_id_count": 132,
+  "paired_cell_count": 66,
+  "cases": [
+    {
+      "fixture_id": "payload_small__decoys_off__n_0001",
+      "disclosure_count": 1
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0032",
+      "disclosure_count": 32
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0128",
+      "disclosure_count": 128
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0512",
+      "disclosure_count": 512
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0001",
+      "disclosure_count": 1
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0032",
+      "disclosure_count": 32
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0128",
+      "disclosure_count": 128
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0512",
+      "disclosure_count": 512
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0001",
+      "disclosure_count": 1
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0032",
+      "disclosure_count": 32
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0128",
+      "disclosure_count": 128
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0512",
+      "disclosure_count": 512
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0001",
+      "disclosure_count": 1
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0032",
+      "disclosure_count": 32
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0128",
+      "disclosure_count": 128
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0512",
+      "disclosure_count": 512
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0001",
+      "disclosure_count": 1
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0032",
+      "disclosure_count": 32
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0128",
+      "disclosure_count": 128
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0512",
+      "disclosure_count": 512
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0001",
+      "disclosure_count": 1
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0032",
+      "disclosure_count": 32
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0128",
+      "disclosure_count": 128
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0512",
+      "disclosure_count": 512
+    },
+    {
+      "fixture_id": "al_nested_obj_n0007",
+      "disclosure_count": 7
+    },
+    {
+      "fixture_id": "al_array_dag_n0008",
+      "disclosure_count": 8
+    },
+    {
+      "fixture_id": "tl_imbalanced_n0008",
+      "disclosure_count": 8
+    }
+  ],
+  "criterion_ids": [
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0001",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0032",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0128",
+    "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0512",
+    "sd_jwt_issuance/v2__s_ea__r_so__f_al_nested_obj_n0007",
+    "sd_jwt_issuance/v2__s_fi__r_so__f_al_nested_obj_n0007",
+    "sd_jwt_issuance/v2__s_ea__r_ac__f_al_nested_obj_n0007",
+    "sd_jwt_issuance/v2__s_fi__r_ac__f_al_nested_obj_n0007",
+    "sd_jwt_issuance/v2__s_ea__r_so__f_al_array_dag_n0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__f_al_array_dag_n0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__f_al_array_dag_n0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__f_al_array_dag_n0008",
+    "sd_jwt_issuance/v2__s_ea__r_so__f_tl_imbalanced_n0008",
+    "sd_jwt_issuance/v2__s_fi__r_so__f_tl_imbalanced_n0008",
+    "sd_jwt_issuance/v2__s_ea__r_ac__f_tl_imbalanced_n0008",
+    "sd_jwt_issuance/v2__s_fi__r_ac__f_tl_imbalanced_n0008"
+  ],
+  "paired_cells": [
+    {
+      "fixture_id": "payload_small__decoys_off__n_0001",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0001",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0032",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0032",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0128",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0128",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0512",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_small__decoys_off__n_0512",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0001",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0001",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0032",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0032",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0128",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0128",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0512",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mn__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mn__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_medium_nested__decoys_off__n_0512",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mn__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mn__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0001",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0001",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0032",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0032",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0128",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0128",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0512",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_l64__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_l64__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_large_64_kib__decoys_off__n_0512",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_l64__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_l64__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0001",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0001",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0001"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0008"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0032",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0032",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0032"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0128",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0128",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0128"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0512",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_off__n_0512",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_0__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_0__n_0512"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0001",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0001"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0001",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0001"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0008"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0008"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0032",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0032"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0032",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0032"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0128",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0128"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0128",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0128"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0512",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_s__d_1__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_s__d_1__n_0512"
+    },
+    {
+      "fixture_id": "payload_small__decoys_on__n_0512",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_s__d_1__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_s__d_1__n_0512"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0001",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0001"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0001",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0001",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0001"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0008"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0008"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0032",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0032"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0032",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0032",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0032"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0128",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0128"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0128",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0128",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0128"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0512",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__p_mx__d_1__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__p_mx__d_1__n_0512"
+    },
+    {
+      "fixture_id": "payload_mixed_nested__decoys_on__n_0512",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__p_mx__d_1__n_0512",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__p_mx__d_1__n_0512"
+    },
+    {
+      "fixture_id": "al_nested_obj_n0007",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__f_al_nested_obj_n0007",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__f_al_nested_obj_n0007"
+    },
+    {
+      "fixture_id": "al_nested_obj_n0007",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__f_al_nested_obj_n0007",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__f_al_nested_obj_n0007"
+    },
+    {
+      "fixture_id": "al_array_dag_n0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__f_al_array_dag_n0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__f_al_array_dag_n0008"
+    },
+    {
+      "fixture_id": "al_array_dag_n0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__f_al_array_dag_n0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__f_al_array_dag_n0008"
+    },
+    {
+      "fixture_id": "tl_imbalanced_n0008",
+      "stage": "executor_assembly",
+      "serial_id": "sd_jwt_issuance/v2__s_ea__r_so__f_tl_imbalanced_n0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_ea__r_ac__f_tl_imbalanced_n0008"
+    },
+    {
+      "fixture_id": "tl_imbalanced_n0008",
+      "stage": "full_issuance",
+      "serial_id": "sd_jwt_issuance/v2__s_fi__r_so__f_tl_imbalanced_n0008",
+      "adaptive_id": "sd_jwt_issuance/v2__s_fi__r_ac__f_tl_imbalanced_n0008"
+    }
+  ],
+  "route_schema": "sd_jwt_issuance_route_v2",
+  "work_estimator_version": "issuance_work_bytes_v1",
+  "static_partition_rule_version": "contiguous_ceil_chunks_v1",
+  "worker_cap": 4,
+  "mechanical_benchmark_thresholds": {
+    "min_jobs": 2,
+    "min_estimated_work_bytes": 1
+  },
+  "qualified_issuance_thresholds": null
+}

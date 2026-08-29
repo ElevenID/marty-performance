@@ -308,3 +308,211 @@ pub struct TestWindowAttestation {
     /// Only synthetic data and identities will be used.
     pub synthetic_data_only: bool,
 }
+
+/// SHA-256 and byte-length binding for one immutable qualification artifact.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ArtifactFingerprint {
+    /// Uppercase hexadecimal SHA-256 without a prefix.
+    pub sha256: String,
+    /// Exact number of bytes hashed.
+    pub byte_length: u64,
+}
+
+/// Canonical issuance matrix exported by the benchmarked SD-JWT crate.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceQualificationManifest {
+    /// Must be `sd_jwt_issuance_qualification_manifest_v1`.
+    pub schema: String,
+    /// Criterion benchmark group containing every full benchmark ID.
+    pub benchmark_group_id: String,
+    /// Number of deterministic fixture cases.
+    pub fixture_case_count: usize,
+    /// Number of full Criterion benchmark IDs.
+    pub benchmark_id_count: usize,
+    /// Number of serial/adaptive stage pairs.
+    pub paired_cell_count: usize,
+    /// Ordered deterministic fixture cases.
+    pub cases: Vec<SdJwtIssuanceQualificationCase>,
+    /// Ordered full Criterion IDs in registration order.
+    pub criterion_ids: Vec<String>,
+    /// Ordered serial/adaptive cells used by the paired campaign.
+    pub paired_cells: Vec<SdJwtIssuanceQualificationCell>,
+    /// Route-evidence schema emitted by the benchmark binary.
+    pub route_schema: String,
+    /// Work-estimator version bound into route evidence.
+    pub work_estimator_version: String,
+    /// Static-partition version bound into route evidence.
+    pub static_partition_rule_version: String,
+    /// Maximum native worker count used by the benchmark selector.
+    pub worker_cap: usize,
+    /// Mechanical benchmark-only selector thresholds.
+    pub mechanical_benchmark_thresholds: SdJwtIssuanceThresholds,
+    /// Evidence-qualified production thresholds, absent before activation.
+    pub qualified_issuance_thresholds: Option<SdJwtIssuanceThresholds>,
+}
+
+/// One deterministic SD-JWT issuance fixture in manifest order.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceQualificationCase {
+    /// Stable non-personal fixture identifier.
+    pub fixture_id: String,
+    /// Number of real disclosures planned by the fixture.
+    pub disclosure_count: usize,
+}
+
+/// One stage-specific serial/adaptive benchmark pair.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceQualificationCell {
+    /// Stable fixture identifier shared by both routes.
+    pub fixture_id: String,
+    /// `executor_assembly` or `full_issuance`.
+    pub stage: String,
+    /// Full Criterion ID for the serial oracle.
+    pub serial_id: String,
+    /// Full Criterion ID for the adaptive candidate.
+    pub adaptive_id: String,
+}
+
+/// Count and estimated-work cutoffs used by an issuance selector.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceThresholds {
+    /// Minimum jobs required before considering parallel work.
+    pub min_jobs: usize,
+    /// Minimum estimated work in bytes.
+    pub min_estimated_work_bytes: usize,
+}
+
+/// Frozen pre-analysis protocol for one SD-JWT issuance campaign.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceQualificationPlan {
+    /// Must be `marty.performance/sd-jwt-issuance-plan/v1`.
+    pub schema: String,
+    /// Fingerprint of the canonical upstream-portable manifest bytes.
+    pub manifest: ArtifactFingerprint,
+    /// Manifest schema accepted by this protocol.
+    pub manifest_schema: String,
+    /// Route schema accepted by this protocol.
+    pub route_schema: String,
+    /// Work-estimator version required in every route record.
+    pub work_estimator_version: String,
+    /// Static-partition version required in every route record.
+    pub static_partition_rule_version: String,
+    /// Worker cap required in every route record.
+    pub worker_cap: usize,
+    /// Number of fixture cases bound into this campaign.
+    pub fixture_case_count: usize,
+    /// Number of paired stage cells bound into this campaign.
+    pub paired_cell_count: usize,
+    /// Number of full benchmark IDs bound into this campaign.
+    pub benchmark_id_count: usize,
+    /// Required quiet-window duration before each protected phase.
+    pub quiet_window_seconds: u64,
+    /// Ordered names of the two independently observed quiet windows.
+    pub quiet_windows: Vec<String>,
+    /// Whether one same-HEAD fixed executable is mandatory for all timing.
+    pub fixed_binary_same_head: bool,
+    /// Criterion process parameters fixed before observing results.
+    pub criterion: SdJwtIssuanceCriterionProtocol,
+    /// Twenty predeclared superblock order labels.
+    pub superblock_orders: Vec<String>,
+    /// Eight routes used by an `ABBA_FIRST` superblock.
+    pub abba_expansion: Vec<String>,
+    /// Eight routes used by a `BAAB_FIRST` superblock.
+    pub baab_expansion: Vec<String>,
+    /// Number of superblocks executed for each paired cell.
+    pub superblocks_per_cell: u32,
+    /// Number of fresh processes in one superblock.
+    pub processes_per_superblock: u32,
+    /// Number of fresh processes for one paired cell.
+    pub processes_per_cell: u32,
+    /// Total fresh processes in the complete campaign.
+    pub total_processes: u32,
+    /// Bootstrap and simultaneous-band protocol.
+    pub bootstrap: SdJwtIssuanceBootstrapProtocol,
+    /// Predeclared paired-effect definitions.
+    pub effects: SdJwtIssuanceEffectProtocol,
+    /// Predeclared threshold-discovery rule.
+    pub discovery: SdJwtIssuanceDiscoveryProtocol,
+    /// Whether production activation requires a later isolated change.
+    pub production_activation_separate: bool,
+}
+
+/// Fixed Criterion arguments for every fresh timing process.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceCriterionProtocol {
+    /// Criterion sample size.
+    pub sample_size: u32,
+    /// Criterion warm-up time in seconds.
+    pub warm_up_seconds: u32,
+    /// Criterion measurement time in seconds.
+    pub measurement_seconds: u32,
+    /// Criterion confidence level.
+    pub confidence_level: f64,
+    /// Whether plot generation is disabled.
+    pub no_plot: bool,
+    /// Statistic read from each Criterion estimates file.
+    pub primary_statistic: String,
+}
+
+/// Fixed whole-superblock bootstrap protocol.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceBootstrapProtocol {
+    /// Number of bootstrap replicates.
+    pub replicates: u32,
+    /// Family-wise confidence level for simultaneous endpoints.
+    pub confidence_level: f64,
+    /// Deterministic pseudo-random generator name.
+    pub rng: String,
+    /// Unsigned generator seed.
+    pub seed: u64,
+    /// Quantile interpolation rule.
+    pub quantile_method: String,
+    /// Atomic bootstrap resampling unit.
+    pub resampling_unit: String,
+    /// Common simultaneous-band construction for the primary effect family.
+    pub simultaneous_band: String,
+}
+
+/// Index pairs and formulas defining the four paired log effects.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceEffectProtocol {
+    /// Sign convention for every ordered log-median difference.
+    pub orientation: String,
+    /// `ABBA_FIRST` serial-first ordered index pairs.
+    pub abba_serial_first_pairs: Vec<[u8; 2]>,
+    /// `ABBA_FIRST` adaptive-first normalized index pairs.
+    pub abba_adaptive_first_pairs: Vec<[u8; 2]>,
+    /// `BAAB_FIRST` serial-first ordered index pairs.
+    pub baab_serial_first_pairs: Vec<[u8; 2]>,
+    /// `BAAB_FIRST` adaptive-first normalized index pairs.
+    pub baab_adaptive_first_pairs: Vec<[u8; 2]>,
+    /// Formula for the serial-first summary `S`.
+    pub s_definition: String,
+    /// Formula for the adaptive-first summary `P`.
+    pub p_definition: String,
+    /// Formula for the combined route effect `D`.
+    pub d_definition: String,
+    /// Formula for the disclosed order diagnostic `O`.
+    pub o_definition: String,
+    /// Effects receiving simultaneous confidence endpoints.
+    pub primary_effects: Vec<String>,
+    /// Effects disclosed without gating.
+    pub disclosure_only_effects: Vec<String>,
+}
+
+/// Frozen discovery rule applied only after valid campaign analysis.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SdJwtIssuanceDiscoveryProtocol {
+    /// Exact ready-batch count eligible for threshold discovery.
+    pub required_ready_batch_count: usize,
+    /// Stages that must pass simultaneously for a fixture.
+    pub required_stages: Vec<String>,
+    /// Strict upper endpoint bound for `D`.
+    pub d_upper_less_than: f64,
+    /// Strict upper endpoint bound for `S`.
+    pub s_upper_less_than: f64,
+    /// Strict upper endpoint bound for `P`.
+    pub p_upper_less_than: f64,
+    /// Rule for resolving the set of passing candidate thresholds.
+    pub selection_rule: String,
+}

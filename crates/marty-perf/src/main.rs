@@ -3,6 +3,7 @@
 mod contract;
 mod doctor;
 mod fixture;
+mod issuance_qualification;
 mod runner;
 mod stack;
 mod tooling;
@@ -31,6 +32,8 @@ enum Command {
     Scenario(ScenarioArgs),
     /// Execute a performance scenario.
     Run(Box<RunArgs>),
+    /// Prepare or execute evidence-qualified microbenchmarks.
+    Qualification(QualificationArgs),
 }
 
 #[derive(Debug, Args)]
@@ -208,6 +211,40 @@ struct FixtureGenerateArgs {
 }
 
 #[derive(Debug, Args)]
+struct QualificationArgs {
+    #[command(subcommand)]
+    command: QualificationCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum QualificationCommand {
+    /// Work with the SD-JWT issuance qualification protocol.
+    Issuance(IssuanceQualificationArgs),
+}
+
+#[derive(Debug, Args)]
+struct IssuanceQualificationArgs {
+    #[command(subcommand)]
+    command: IssuanceQualificationCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum IssuanceQualificationCommand {
+    /// Validate a canonical manifest and freeze the pre-analysis plan.
+    Plan(IssuanceQualificationPlanArgs),
+}
+
+#[derive(Debug, Args)]
+struct IssuanceQualificationPlanArgs {
+    /// Canonical manifest emitted by the fixed SD-JWT benchmark source.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Absolute create-new destination for the frozen qualification plan.
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct ScenarioArgs {
     #[command(subcommand)]
     command: ScenarioCommand,
@@ -283,6 +320,13 @@ fn main() -> Result<()> {
                 allow_remote_target: args.allow_remote_target,
                 force: args.force,
             }),
+        },
+        Command::Qualification(args) => match args.command {
+            QualificationCommand::Issuance(args) => match args.command {
+                IssuanceQualificationCommand::Plan(args) => {
+                    issuance_qualification::write_plan(&args.manifest, &args.output)
+                }
+            },
         },
     }
 }

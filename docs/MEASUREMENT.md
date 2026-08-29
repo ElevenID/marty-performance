@@ -35,6 +35,24 @@ throughput comparisons use equal correctness and saturation criteria.
 
 A separate no-telemetry control quantifies instrumentation cost.
 
+## SD-JWT issuance qualification
+
+The issuance microbenchmark uses a source-emitted canonical manifest rather
+than rediscovering Criterion IDs from filesystem paths. Freeze its
+pre-analysis protocol before building or timing:
+
+    cargo run --locked -- qualification issuance plan \
+      --manifest <canonical-manifest.json> \
+      --output <absolute-new-plan.json>
+
+The plan command rejects changed matrix cardinality, route or estimator
+versions, noncanonical bytes, activated production thresholds, reused
+benchmark IDs, and an existing output. The v1 plan fixes two independent
+45-minute quiet windows, one same-HEAD executable, 20 eight-process
+superblocks per paired cell, the Criterion process arguments, and the
+whole-superblock simultaneous bootstrap. It describes 10,560 fresh timing
+processes but does not execute them or activate a production threshold.
+
 ## Test window
 
 Contract-defined workloads require a time-bounded attestation that production

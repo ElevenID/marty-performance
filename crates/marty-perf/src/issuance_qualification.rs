@@ -14,7 +14,7 @@ use marty_perf_schema::{
 use sha2::{Digest, Sha256};
 
 const MANIFEST_SCHEMA: &str = "sd_jwt_issuance_qualification_manifest_v1";
-const PLAN_SCHEMA: &str = "marty.performance/sd-jwt-issuance-plan/v1";
+const PLAN_SCHEMA: &str = "marty.performance/sd-jwt-issuance-plan/v2";
 const BENCHMARK_GROUP_ID: &str = "sd_jwt_issuance";
 const ROUTE_SCHEMA: &str = "sd_jwt_issuance_route_v2";
 const WORK_ESTIMATOR_VERSION: &str = "issuance_work_bytes_v1";
@@ -317,7 +317,7 @@ fn plan_for_manifest(
         .checked_mul(u32::try_from(PAIRED_CELL_COUNT).context("paired cell count overflow")?)
         .context("total process count overflow")?;
 
-    Ok(SdJwtIssuanceQualificationPlan {
+    let plan = SdJwtIssuanceQualificationPlan {
         schema: PLAN_SCHEMA.to_owned(),
         manifest: ArtifactFingerprint {
             sha256: hex::encode_upper(Sha256::digest(manifest_bytes)),
@@ -377,13 +377,24 @@ fn plan_for_manifest(
         discovery: SdJwtIssuanceDiscoveryProtocol {
             required_ready_batch_count: 1,
             required_stages: vec!["executor_assembly".to_owned(), "full_issuance".to_owned()],
-            d_upper_less_than: -0.05,
-            s_upper_less_than: 0.0,
-            p_upper_less_than: 0.0,
+            percent_transform: "100.0 * (exp(effect) - 1.0)".to_owned(),
+            d_upper_percent_less_than: -5.0,
+            s_upper_percent_less_than: 0.0,
+            p_upper_percent_less_than: 0.0,
             selection_rule: "unique_inclusion_maximal_else_none".to_owned(),
         },
         production_activation_separate: true,
-    })
+    };
+    validate_plan_schema(&plan)?;
+    Ok(plan)
+}
+
+fn validate_plan_schema(plan: &SdJwtIssuanceQualificationPlan) -> Result<()> {
+    anyhow::ensure!(
+        plan.schema == PLAN_SCHEMA,
+        "qualification plan schema must be the percent-domain v2 contract"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -476,7 +487,69 @@ mod tests {
         assert_eq!(plan.bootstrap.seed, 2_453_812_215);
         assert_eq!(plan.effects.abba_serial_first_pairs, [[1, 0], [7, 6]]);
         assert_eq!(plan.effects.baab_adaptive_first_pairs, [[0, 1], [6, 7]]);
-        assert!((plan.discovery.d_upper_less_than + 0.05).abs() < f64::EPSILON);
+        assert_eq!(
+            plan.discovery.percent_transform,
+            "100.0 * (exp(effect) - 1.0)"
+        );
+        assert_eq!(
+            plan.discovery.d_upper_percent_less_than.to_bits(),
+            (-5.0_f64).to_bits()
+        );
+        assert_eq!(
+            plan.discovery.s_upper_percent_less_than.to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            plan.discovery.p_upper_percent_less_than.to_bits(),
+            0.0_f64.to_bits()
+        );
+        let encoded = String::from_utf8(
+            serde_json::to_vec_pretty(&plan).expect("serialize qualification plan"),
+        )
+        .expect("qualification plan is UTF-8");
+        assert!(encoded.contains("\"schema\": \"marty.performance/sd-jwt-issuance-plan/v2\""));
+        assert!(encoded.contains("\"d_upper_percent_less_than\": -5.0"));
+        assert!(!encoded.contains("\"d_upper_less_than\""));
+
+        let plan_value = serde_json::to_value(&plan).expect("plan JSON value");
+        let mut v1_with_v2_fields = plan_value.clone();
+        v1_with_v2_fields["schema"] =
+            serde_json::json!("marty.performance/sd-jwt-issuance-plan/v1");
+        let parsed_v1_with_v2_fields =
+            serde_json::from_value::<SdJwtIssuanceQualificationPlan>(v1_with_v2_fields)
+                .expect("field shape is independently parseable");
+        assert!(validate_plan_schema(&parsed_v1_with_v2_fields).is_err());
+
+        let mut v2_with_v1_fields = plan_value;
+        let legacy_discovery = v2_with_v1_fields["discovery"]
+            .as_object_mut()
+            .expect("discovery object");
+        for effect in ["d", "s", "p"] {
+            let percent_name = format!("{effect}_upper_percent_less_than");
+            let legacy_name = format!("{effect}_upper_less_than");
+            let value = legacy_discovery
+                .remove(&percent_name)
+                .expect("percent-domain bound");
+            legacy_discovery.insert(legacy_name, value);
+        }
+        assert!(
+            serde_json::from_value::<SdJwtIssuanceQualificationPlan>(v2_with_v1_fields.clone())
+                .is_err(),
+            "v2 must reject the incompatible v1 field shape"
+        );
+
+        let mut mixed_v2_fields = serde_json::to_value(&plan).expect("plan JSON value");
+        mixed_v2_fields["discovery"]["d_upper_less_than"] = serde_json::json!(-0.05);
+        assert!(
+            serde_json::from_value::<SdJwtIssuanceQualificationPlan>(mixed_v2_fields).is_err(),
+            "v2 must reject mixed legacy and percent-domain fields"
+        );
+        v2_with_v1_fields["schema"] =
+            serde_json::json!("marty.performance/sd-jwt-issuance-plan/v1");
+        assert!(
+            serde_json::from_value::<SdJwtIssuanceQualificationPlan>(v2_with_v1_fields).is_err(),
+            "v1 evidence must not be silently reinterpreted"
+        );
         assert!(plan.production_activation_separate);
         assert_eq!(plan.manifest.byte_length, bytes.len() as u64);
         assert_eq!(plan.manifest.sha256.len(), 64);

@@ -385,7 +385,7 @@ pub struct SdJwtIssuanceThresholds {
 /// Frozen pre-analysis protocol for one SD-JWT issuance campaign.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SdJwtIssuanceQualificationPlan {
-    /// Must be `marty.performance/sd-jwt-issuance-plan/v1`.
+    /// Must be `marty.performance/sd-jwt-issuance-plan/v2`.
     pub schema: String,
     /// Fingerprint of the canonical upstream-portable manifest bytes.
     pub manifest: ArtifactFingerprint,
@@ -502,17 +502,20 @@ pub struct SdJwtIssuanceEffectProtocol {
 
 /// Frozen discovery rule applied only after valid campaign analysis.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceDiscoveryProtocol {
     /// Exact ready-batch count eligible for threshold discovery.
     pub required_ready_batch_count: usize,
     /// Stages that must pass simultaneously for a fixture.
     pub required_stages: Vec<String>,
-    /// Strict upper endpoint bound for `D`.
-    pub d_upper_less_than: f64,
-    /// Strict upper endpoint bound for `S`.
-    pub s_upper_less_than: f64,
-    /// Strict upper endpoint bound for `P`.
-    pub p_upper_less_than: f64,
+    /// Exact relative-percent transform applied to each log effect.
+    pub percent_transform: String,
+    /// Strict percentage-point upper bound for transformed `D`.
+    pub d_upper_percent_less_than: f64,
+    /// Strict percentage-point upper bound for transformed `S`.
+    pub s_upper_percent_less_than: f64,
+    /// Strict percentage-point upper bound for transformed `P`.
+    pub p_upper_percent_less_than: f64,
     /// Rule for resolving the set of passing candidate thresholds.
     pub selection_rule: String,
 }

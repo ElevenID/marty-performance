@@ -4,6 +4,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Authoritative pre-parse cap for a V3 issuance qualification plan.
+///
+/// An analyzer must enforce this compiled constant before UTF-8 or JSON parsing;
+/// a limit learned from the plan itself is not a safe allocation boundary.
+pub const MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES: u64 = 1_048_576;
+
 /// Public Marty release manifest consumed by the runner.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StackManifest {
@@ -311,6 +317,7 @@ pub struct TestWindowAttestation {
 
 /// SHA-256 and byte-length binding for one immutable qualification artifact.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactFingerprint {
     /// Uppercase hexadecimal SHA-256 without a prefix.
     pub sha256: String,
@@ -320,6 +327,7 @@ pub struct ArtifactFingerprint {
 
 /// Canonical issuance matrix exported by the benchmarked SD-JWT crate.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceQualificationManifest {
     /// Must be `sd_jwt_issuance_qualification_manifest_v1`.
     pub schema: String,
@@ -353,6 +361,7 @@ pub struct SdJwtIssuanceQualificationManifest {
 
 /// One deterministic SD-JWT issuance fixture in manifest order.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceQualificationCase {
     /// Stable non-personal fixture identifier.
     pub fixture_id: String,
@@ -362,6 +371,7 @@ pub struct SdJwtIssuanceQualificationCase {
 
 /// One stage-specific serial/adaptive benchmark pair.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceQualificationCell {
     /// Stable fixture identifier shared by both routes.
     pub fixture_id: String,
@@ -375,6 +385,7 @@ pub struct SdJwtIssuanceQualificationCell {
 
 /// Count and estimated-work cutoffs used by an issuance selector.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceThresholds {
     /// Minimum jobs required before considering parallel work.
     pub min_jobs: usize,
@@ -384,8 +395,9 @@ pub struct SdJwtIssuanceThresholds {
 
 /// Frozen pre-analysis protocol for one SD-JWT issuance campaign.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceQualificationPlan {
-    /// Must be `marty.performance/sd-jwt-issuance-plan/v2`.
+    /// Must be `marty.performance/sd-jwt-issuance-plan/v3`.
     pub schema: String,
     /// Fingerprint of the canonical upstream-portable manifest bytes.
     pub manifest: ArtifactFingerprint,
@@ -413,13 +425,13 @@ pub struct SdJwtIssuanceQualificationPlan {
     pub fixed_binary_same_head: bool,
     /// Criterion process parameters fixed before observing results.
     pub criterion: SdJwtIssuanceCriterionProtocol,
-    /// Twenty predeclared superblock order labels.
+    /// Twenty predeclared superblock labels aligned by global-round ordinal.
     pub superblock_orders: Vec<String>,
     /// Eight routes used by an `ABBA_FIRST` superblock.
     pub abba_expansion: Vec<String>,
     /// Eight routes used by a `BAAB_FIRST` superblock.
     pub baab_expansion: Vec<String>,
-    /// Number of superblocks executed for each paired cell.
+    /// Number of global rounds, and therefore superblocks per paired cell.
     pub superblocks_per_cell: u32,
     /// Number of fresh processes in one superblock.
     pub processes_per_superblock: u32,
@@ -427,6 +439,8 @@ pub struct SdJwtIssuanceQualificationPlan {
     pub processes_per_cell: u32,
     /// Total fresh processes in the complete campaign.
     pub total_processes: u32,
+    /// Global-round execution and run-validity contract.
+    pub global_rounds: SdJwtIssuanceGlobalRoundProtocol,
     /// Bootstrap and simultaneous-band protocol.
     pub bootstrap: SdJwtIssuanceBootstrapProtocol,
     /// Predeclared paired-effect definitions.
@@ -437,25 +451,607 @@ pub struct SdJwtIssuanceQualificationPlan {
     pub production_activation_separate: bool,
 }
 
+/// Campaign-wide cluster alignment required by the common bootstrap.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceGlobalRoundProtocol {
+    /// Exact nesting order for every fresh timing process.
+    pub execution_nesting: String,
+    /// How one ordinal aligns superblocks across all paired cells.
+    pub ordinal_alignment: String,
+    /// Number of paired cells completed in every global round.
+    pub cells_per_round: u32,
+    /// Number of fresh Criterion processes completed in every global round.
+    pub processes_per_round: u32,
+    /// Timing processes permitted to run concurrently.
+    pub concurrent_timing_processes: u32,
+    /// Uninterrupted continuous run-validity evidence contract.
+    pub run_validity: SdJwtIssuanceRunValidityProtocol,
+}
+
+/// Continuous evidence required to keep a multi-day campaign valid.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceRunValidityProtocol {
+    /// Must be `marty.performance/sd-jwt-issuance-run-validity/v1`.
+    pub schema: String,
+    /// Durable segmented evidence representation.
+    pub artifact_format: String,
+    /// Exact JSON lexical normalization used by every validity artifact.
+    pub canonicalization_rule: String,
+    /// Exact representation required for every UTC timestamp string.
+    pub utc_format_rule: String,
+    /// Single-process monotonic origin and observation-time rule.
+    pub monotonic_clock_rule: String,
+    /// Deterministic relative paths and safe artifact-resolution behavior.
+    pub artifact_inventory_rule: String,
+    /// Closed schemas, fixed role paths, and privacy rules for global preimages.
+    pub global_preimages: SdJwtIssuanceGlobalPreimageProtocol,
+    /// Integrity boundary assumed by the unkeyed evidence chain.
+    pub threat_model: String,
+    /// Exact beginning and end of required monitor coverage.
+    pub coverage: String,
+    /// Clean monitor coverage required before the first timing process.
+    pub pre_timing_quiet_seconds: u32,
+    /// Target interval between monitor samples.
+    pub sample_interval_seconds: u32,
+    /// Largest permitted monotonic-clock gap between samples.
+    pub maximum_sample_gap_seconds: u32,
+    /// Parser, storage, process, and campaign limits.
+    pub limits: SdJwtIssuanceRunValidityLimits,
+    /// Hash and monotonic-time continuity rule between segments.
+    pub segment_chain_rule: String,
+    /// Ordinal rule for every record inside a segment.
+    pub record_ordinal_rule: String,
+    /// Ordinal rule shared by all lifecycle-event variants.
+    pub event_ordinal_rule: String,
+    /// Closed reasons permitted in a segment footer.
+    pub segment_close_reason_literals: Vec<String>,
+    /// Exact coupling between each footer reason and its close trigger.
+    pub segment_close_reason_rule: String,
+    /// Required coordinate order and start/finish state machine.
+    pub process_schedule_rule: String,
+    /// Test-window renewal rule across the complete campaign.
+    pub attestation_chain_rule: String,
+    /// Typed proof for the first pre-build quiet window.
+    pub first_quiet_window: SdJwtIssuanceFirstQuietWindowProtocol,
+    /// Typed, non-secret per-process invocation descriptor.
+    pub invocation_descriptor: SdJwtIssuanceInvocationDescriptorProtocol,
+    /// Cooperative launch-gate token and child-receipt contract.
+    pub launch_barrier: SdJwtIssuanceLaunchBarrierProtocol,
+    /// Unique Criterion-home inventory and freshness contract.
+    pub criterion_home: SdJwtIssuanceCriterionHomeProtocol,
+    /// Selected-ID route-evidence record emitted by each timing process.
+    pub route_artifact: SdJwtIssuanceRouteArtifactProtocol,
+    /// Canonical coordinate-to-artifact indexes bound by completion.
+    pub artifact_indexes: SdJwtIssuanceArtifactIndexProtocol,
+    /// Exact versioned record variants permitted in segment files.
+    pub records: SdJwtIssuanceRunValidityRecordProtocols,
+    /// Separately created terminal artifact and external anchor contract.
+    pub completion: SdJwtIssuanceRunValidityCompletionProtocol,
+    /// Events that make the campaign invalid.
+    pub invalidating_events: Vec<String>,
+    /// Fail-closed scope applied to any event or continuity gap.
+    pub invalidation_rule: String,
+}
+
+/// Resource and cardinality limits for one issuance campaign.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceRunValidityLimits {
+    /// Compiled pre-parse cap that this plan must repeat exactly.
+    pub maximum_plan_bytes: u64,
+    /// Maximum duration of one chained segment.
+    pub maximum_segment_seconds: u32,
+    /// Maximum encoded size of one segment.
+    pub maximum_segment_bytes: u64,
+    /// Maximum encoded size of one validity-segment NDJSON record including LF.
+    pub maximum_line_bytes: u32,
+    /// Maximum records in one segment including header and footer.
+    pub maximum_records_per_segment: u32,
+    /// Maximum segments in the completed campaign.
+    pub maximum_segment_count: u32,
+    /// Maximum encoded size of the completion manifest.
+    pub maximum_completion_manifest_bytes: u64,
+    /// Hard pre-parse limit for the independently supplied completion anchor.
+    pub maximum_external_anchor_bytes: u64,
+    /// Fallback cap for auxiliary preimages without a dedicated size limit.
+    pub maximum_auxiliary_preimage_bytes: u64,
+    /// Maximum size of one selected-ID route artifact including LF.
+    pub maximum_route_artifact_bytes: u64,
+    /// Maximum bytes across all selected-ID route artifacts.
+    pub maximum_total_route_artifact_bytes: u64,
+    /// Maximum bytes in one complete Criterion home.
+    pub maximum_criterion_home_bytes: u64,
+    /// Maximum bytes across all complete Criterion homes.
+    pub maximum_total_criterion_home_bytes: u64,
+    /// Maximum bytes in the complete retained fixed-build input archive.
+    pub maximum_build_input_bytes: u64,
+    /// Maximum bytes in one launch ready or release frame including LF.
+    pub maximum_launch_frame_bytes: u32,
+    /// Maximum seconds from successful spawn to a validated ready frame.
+    pub maximum_spawn_to_ready_seconds: u32,
+    /// Maximum drained stdout plus stderr bytes for one timing process.
+    pub maximum_process_output_bytes: u64,
+    /// Maximum bytes across all bound campaign evidence.
+    pub maximum_total_evidence_bytes: u64,
+    /// Maximum records across all segments.
+    pub maximum_total_records: u64,
+    /// Maximum elapsed monotonic duration of the campaign.
+    pub maximum_campaign_seconds: u32,
+    /// Maximum elapsed monotonic duration of one timing process.
+    pub maximum_timing_process_seconds: u32,
+    /// Maximum proved delay from terminal footer to final anchor publication.
+    pub maximum_anchor_publication_delay_seconds: u32,
+    /// Maximum actual test-window attestations in the completed chain.
+    pub maximum_test_window_attestations: u32,
+    /// Exact number of scheduled global rounds.
+    pub exact_global_rounds: u32,
+    /// Exact number of cells in each global round.
+    pub exact_cells_per_round: u32,
+    /// Exact number of expansion positions in each cell.
+    pub exact_expansion_positions_per_cell: u32,
+    /// Exact number of successful timing-process completions.
+    pub exact_timing_processes: u32,
+    /// Streaming, pre-allocation, and aggregate-size enforcement rule.
+    pub validation_rule: String,
+}
+
+/// Exact schemas for every record permitted in a validity segment.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceRunValidityRecordProtocols {
+    /// First record of segment zero.
+    pub genesis_header: SdJwtIssuanceEvidenceRecordProtocol,
+    /// First record of every later segment.
+    pub continuation_header: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Periodic host and process observation.
+    pub sample: SdJwtIssuanceEvidenceRecordProtocol,
+    /// PID-free launch intent durably recorded before process creation.
+    pub process_intent: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Timing-process start transition.
+    pub process_start: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Timing-process terminal transition.
+    pub process_finish: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Actual test-window attestation renewal.
+    pub attestation_transition: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Last record of every segment.
+    pub segment_footer: SdJwtIssuanceEvidenceRecordProtocol,
+}
+
+/// One versioned NDJSON record contract.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceEvidenceRecordProtocol {
+    /// Exact value of the record's `schema` field.
+    pub schema: String,
+    /// Fields in mandatory canonical JSON key order.
+    pub fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Required number and ordering of this record variant.
+    pub cardinality: String,
+    /// Cross-field and lifecycle constraints.
+    pub semantic_rule: String,
+}
+
+/// One field in a versioned validity-evidence record.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceEvidenceFieldProtocol {
+    /// Canonical JSON key.
+    pub name: String,
+    /// JSON representation required for the value.
+    pub json_type: SdJwtIssuanceEvidenceJsonType,
+    /// Whether JSON `null` is permitted for this required key.
+    pub nullable: bool,
+}
+
+/// Closed JSON representations used by validity-evidence fields.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdJwtIssuanceEvidenceJsonType {
+    /// JSON string.
+    String,
+    /// Unsigned 32-bit JSON integer.
+    U32,
+    /// Unsigned 64-bit JSON integer.
+    U64,
+    /// Signed 32-bit JSON integer.
+    I32,
+    /// Signed 64-bit JSON integer.
+    I64,
+    /// Finite JSON number represented as an IEEE-754 binary64 value.
+    F64,
+    /// JSON boolean.
+    Boolean,
+    /// JSON array of strings.
+    StringArray,
+    /// Ordered JSON array of privacy-preserving environment-entry objects.
+    NameValueArray,
+    /// `ArtifactFingerprint` JSON object.
+    ArtifactFingerprint,
+    /// JSON array of `ArtifactFingerprint` objects.
+    ArtifactFingerprintArray,
+    /// Ordered JSON array of completed-process objects.
+    ProcessCompletionArray,
+    /// Ordered JSON array of first-window sample objects.
+    QuietWindowSampleArray,
+    /// Ordered JSON array of Criterion-home inventory entries.
+    ArtifactInventoryEntryArray,
+    /// Ordered JSON array of issuance-route ready-batch objects.
+    RouteReadyBatchArray,
+    /// Ordered JSON array of issuance-route static-chunk objects.
+    RouteStaticChunkArray,
+    /// Ordered JSON array of coordinate-to-artifact index entries.
+    CoordinateArtifactArray,
+    /// Ordered JSON array of privacy-preserving process-identity entries.
+    ProcessIdentityArray,
+    /// Ordered JSON array of exact-source-tree archive manifest entries.
+    SourceArchiveEntryArray,
+}
+
+/// Closed campaign-wide fingerprint-preimage and privacy contract.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceGlobalPreimageProtocol {
+    /// Canonical representation and durability rule for typed JSON preimages.
+    pub artifact_format: String,
+    /// Fixed role path for every global preimage and safe-resolution behavior.
+    pub resolution_rule: String,
+    /// Secret-free controller configuration retained with the campaign.
+    pub controller_configuration: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Secret-free monitor configuration retained with the campaign.
+    pub monitor_configuration: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Campaign-scoped opaque host identity.
+    pub host_identity: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Shareable performance-relevant hardware projection.
+    pub hardware_profile: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Exact numeric domain shared by hardware, thresholds, and observations.
+    pub observation_bounds: SdJwtIssuanceObservationBounds,
+    /// Closed operating-system family values in hardware evidence.
+    pub operating_system_family_literals: Vec<String>,
+    /// Closed architecture values in hardware evidence.
+    pub architecture_literals: Vec<String>,
+    /// Closed virtualization values in hardware evidence.
+    pub virtualization_kind_literals: Vec<String>,
+    /// Closed power-policy values in hardware evidence.
+    pub power_policy_literals: Vec<String>,
+    /// Closed throttle-flag values in thresholds and observations.
+    pub throttle_flag_literals: Vec<String>,
+    /// Closed host-validity threshold document.
+    pub validity_thresholds: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Baseline and sampled privacy-preserving unrelated-process sets.
+    pub unrelated_process_set: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Fields in each ordered opaque process-identity entry.
+    pub process_identity_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Privacy-preserving projection of one authorized test window.
+    pub test_window_attestation: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Closed non-endpoint roles for test-window targets.
+    pub test_window_target_role_literals: Vec<String>,
+    /// Trusted-controller receipt linking the installed fixed binary to source and build inputs.
+    pub fixed_binary_build_receipt: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Complete typed inventory of dependency, toolchain, linker, and runtime build inputs.
+    pub fixed_binary_build_input_inventory: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Fields in each ordered fixed-build input-inventory entry.
+    pub fixed_binary_build_input_inventory_entry_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Closed role literals for fixed-build input-inventory entries.
+    pub fixed_binary_build_input_role_literals: Vec<String>,
+    /// Exact role roots and cardinalities for the fixed-build input inventory.
+    pub fixed_binary_build_input_role_rule: String,
+    /// Portable path grammar and ordered executable-directory reconstruction rule.
+    pub fixed_binary_build_input_path_rule: String,
+    /// Closed portable logical modes for retained fixed-build input members.
+    pub fixed_binary_build_input_mode_literals: Vec<String>,
+    /// Deterministic retained fixed-build input archive representation.
+    pub fixed_binary_build_input_archive_format: String,
+    /// Exact archive, inventory, member, and materialization binding rule.
+    pub fixed_binary_build_input_archive_rule: String,
+    /// Hard maximum members in the retained fixed-build input archive.
+    pub maximum_fixed_binary_build_input_entries: u32,
+    /// Fields in each ordered fixed-build environment entry.
+    pub fixed_binary_build_environment_entry_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Complete case-sensitive fixed-build parent-environment allowlist.
+    pub fixed_binary_build_environment_allowlist: Vec<String>,
+    /// Exact platform mapping for every fixed-build environment entry.
+    pub fixed_binary_build_environment_mapping_rule: String,
+    /// Canonical absolute sandbox root used for Windows fixed builds.
+    pub fixed_binary_build_root_windows: String,
+    /// Canonical absolute sandbox root used for non-Windows fixed builds.
+    pub fixed_binary_build_root_non_windows: String,
+    /// Exact build command, environment, output-selection, and binary-linkage rule.
+    pub fixed_binary_build_rule: String,
+    /// Schema of the canonical exact-source-tree archive manifest.
+    pub source_archive_manifest_schema: String,
+    /// Fields in the canonical exact-source-tree archive manifest.
+    pub source_archive_manifest_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each ordered source-tree manifest entry.
+    pub source_archive_entry_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Hard maximum bytes in the complete source archive.
+    pub maximum_source_archive_bytes: u64,
+    /// Hard maximum bytes in the canonical source manifest including LF.
+    pub maximum_source_archive_manifest_bytes: u64,
+    /// Hard maximum bytes in the raw Git commit content.
+    pub maximum_source_archive_commit_bytes: u64,
+    /// Hard maximum source entries in one archive.
+    pub maximum_source_archive_entries: u32,
+    /// Hard maximum encoded ASCII bytes in one repository-relative path.
+    pub maximum_source_archive_path_bytes: u32,
+    /// Hard maximum encoded ASCII bytes in one path segment.
+    pub maximum_source_archive_path_segment_bytes: u32,
+    /// Hard maximum segments in one repository-relative path.
+    pub maximum_source_archive_path_segments: u32,
+    /// Hard maximum nodes in the bounded derived source-directory arena.
+    pub maximum_source_archive_derived_directory_nodes: u32,
+    /// Hard maximum logical component bytes cloned into the derived path arena.
+    pub maximum_source_archive_derived_component_bytes: u64,
+    /// Deterministic archive representation and parser bounds.
+    pub source_archive_format: String,
+    /// Exact-tree, commit-object, membership, and no-extra-object rule.
+    pub source_archive_rule: String,
+    /// Campaign-wide prohibition on secrets and identifying host metadata.
+    pub privacy_rule: String,
+}
+
+/// Closed numeric ranges used by captured hardware and host observations.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceObservationBounds {
+    /// Inclusive minimum finite CPU percentage.
+    pub minimum_cpu_percent: f64,
+    /// Inclusive maximum finite CPU percentage.
+    pub maximum_cpu_percent: f64,
+    /// Inclusive minimum nonzero CPU frequency.
+    pub minimum_cpu_frequency_hz: u64,
+    /// Inclusive maximum CPU frequency.
+    pub maximum_cpu_frequency_hz: u64,
+    /// Inclusive minimum temperature observation.
+    pub minimum_temperature_millidegrees_celsius: i64,
+    /// Inclusive maximum temperature observation or threshold.
+    pub maximum_temperature_millidegrees_celsius: i64,
+    /// Inclusive maximum physical memory size represented by the protocol.
+    pub maximum_total_memory_bytes: u64,
+    /// Inclusive maximum logical CPU count.
+    pub maximum_logical_cpu_count: u32,
+    /// Inclusive maximum unrelated-process count.
+    pub maximum_unrelated_process_count: u32,
+}
+
+/// Canonical first-window proof created before correctness and build work.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceFirstQuietWindowProtocol {
+    /// Exact value of the artifact's `schema` field.
+    pub schema: String,
+    /// Canonical create-new representation and durability rule.
+    pub artifact_format: String,
+    /// Fields in mandatory canonical JSON key order.
+    pub fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each ordered `samples` array entry.
+    pub sample_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Duration, cadence, provenance, and fail-closed validation rule.
+    pub validity_rule: String,
+}
+
+/// Canonical descriptor for one cleared, allowlisted child invocation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceInvocationDescriptorProtocol {
+    /// Exact value of the descriptor's `schema` field.
+    pub schema: String,
+    /// Canonical create-new representation and durability rule.
+    pub artifact_format: String,
+    /// Fields in mandatory canonical JSON key order.
+    pub fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each ordered `environment` array entry.
+    pub environment_entry_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Complete case-sensitive environment allowlist.
+    pub environment_allowlist: Vec<String>,
+    /// Closed `value_kind` domain for environment entries.
+    pub environment_value_kind_literals: Vec<String>,
+    /// Exact platform-specific name, kind, and portable-value mapping.
+    pub environment_mapping_rule: String,
+    /// Exact coordinate, command, environment, and fresh-home constraints.
+    pub semantic_rule: String,
+    /// Deterministic descriptor and Criterion-home discovery rule.
+    pub resolution_rule: String,
+}
+
+/// Cooperative standard-stream barrier that holds a spawned child before Criterion setup.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceLaunchBarrierProtocol {
+    /// Exact value of the release token's `schema` field.
+    pub token_schema: String,
+    /// Fields in a canonical release token.
+    pub token_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact grammar and campaign-wide uniqueness rule for token nonces.
+    pub nonce_rule: String,
+    /// Exact grammar, independence, and campaign-wide uniqueness rule for process aliases.
+    pub process_identity_pseudonym_rule: String,
+    /// Exact value of the child's ready-frame `schema` field.
+    pub ready_frame_schema: String,
+    /// Fields in the canonical child ready frame.
+    pub ready_frame_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact value of the controller's release-frame `schema` field.
+    pub release_frame_schema: String,
+    /// Fields in the canonical controller release frame.
+    pub release_frame_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact value of the child's receipt `schema` field.
+    pub receipt_schema: String,
+    /// Fields in a canonical child receipt.
+    pub receipt_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact lexical representation and persistence rule for tokens, frames, and receipts.
+    pub artifact_format: String,
+    /// Standard-stream framing, closure, and rejection behavior.
+    pub transport_rule: String,
+    /// Creation, synchronization, observation, and ordering constraints.
+    pub semantic_rule: String,
+}
+
+/// Canonical inventories proving that every Criterion home begins empty.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceCriterionHomeProtocol {
+    /// Exact value of each inventory's `schema` field.
+    pub inventory_schema: String,
+    /// Fields in an initial or final inventory.
+    pub inventory_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each ordered `entries` array element.
+    pub entry_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Raw-byte hashing and parser scope for Criterion-owned files.
+    pub opaque_artifact_rule: String,
+    /// Exact typed projection required from Criterion's `benchmark.json`.
+    pub benchmark_json_projection_rule: String,
+    /// Exact typed projection required from Criterion's `estimates.json`.
+    pub estimates_json_projection_rule: String,
+    /// Empty-home, path, artifact, and lifecycle freshness constraints.
+    pub freshness_rule: String,
+}
+
+/// One selected benchmark route record emitted outside Criterion timing.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceRouteArtifactProtocol {
+    /// Exact `schema` value in the one retained route record.
+    pub record_schema: String,
+    /// Exact locked serialization and create-new persistence representation.
+    pub artifact_format: String,
+    /// Fields in mandatory route-record key order.
+    pub record_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each non-null ordered `ready_batches` element.
+    pub ready_batch_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each non-null ordered `static_chunks` element.
+    pub static_chunk_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Closed `stage` string domain.
+    pub stage_literals: Vec<String>,
+    /// Closed `requested` route string domain.
+    pub requested_literals: Vec<String>,
+    /// Closed `effective` route string domain.
+    pub effective_literals: Vec<String>,
+    /// Closed `work_estimate_status` string domain.
+    pub work_estimate_status_literals: Vec<String>,
+    /// Closed `budget_acquisition_result` string domain.
+    pub budget_acquisition_result_literals: Vec<String>,
+    /// Closed `selected_mode` string domain.
+    pub selected_mode_literals: Vec<String>,
+    /// Closed `selection_reason` string domain.
+    pub selection_reason_literals: Vec<String>,
+    /// Full-matrix validation and selected-ID retention rule.
+    pub selected_record_rule: String,
+    /// Record-level nullability, count, and effective-route equations.
+    pub record_invariant_rule: String,
+    /// Ready-batch selector decision tree and field couplings.
+    pub ready_batch_invariant_rule: String,
+    /// Native static-chunk cardinality, ordinal, and sum equations.
+    pub static_chunk_invariant_rule: String,
+}
+
+/// Canonical indexes mapping every process coordinate to one selected artifact.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceArtifactIndexProtocol {
+    /// Schema for `indexes/criterion-artifacts.json`.
+    pub criterion_schema: String,
+    /// Schema for `indexes/route-artifacts.json`.
+    pub route_schema: String,
+    /// Exact canonical create-new representation and durability rule.
+    pub artifact_format: String,
+    /// Fields in each index artifact.
+    pub fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each ordered `entries` element.
+    pub entry_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact `artifact_kind` literal for the Criterion index.
+    pub criterion_artifact_kind: String,
+    /// Exact `artifact_kind` literal for the route index.
+    pub route_artifact_kind: String,
+    /// Exact slash-normalized Criterion artifact path formatter.
+    pub criterion_path_rule: String,
+    /// Exact slash-normalized route artifact path formatter.
+    pub route_path_rule: String,
+    /// Exact cardinality, order, path, and fingerprint constraints.
+    pub validity_rule: String,
+}
+
+/// Terminal manifest that commits the completed forward evidence chain.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceRunValidityCompletionProtocol {
+    /// Exact value of the completion manifest's `schema` field.
+    pub schema: String,
+    /// Canonical create-new representation and durability rule.
+    pub artifact_format: String,
+    /// Fields in mandatory canonical JSON key order.
+    pub fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Fields in each ordered `process_completions` array entry.
+    pub process_completion_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact successful-campaign content and cardinality rule.
+    pub validity_rule: String,
+    /// Exact schema of the signed ordinal-zero terminal observation receipt.
+    pub terminal_observation_receipt_schema: String,
+    /// Fields in the signed terminal observation receipt.
+    pub terminal_observation_receipt_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact schema of the Marty-owned controller observation wrapper.
+    pub terminal_observation_evidence_schema: String,
+    /// Fields in the Marty-owned controller observation wrapper.
+    pub terminal_observation_evidence_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Exact schema of the independently delivered completion anchor.
+    pub external_anchor_schema: String,
+    /// Fields in the independently delivered completion anchor.
+    pub external_anchor_fields: Vec<SdJwtIssuanceEvidenceFieldProtocol>,
+    /// Canonical representation of the independent anchor.
+    pub external_anchor_format: String,
+    /// Out-of-band authenticated append-only channel configuration contract.
+    pub external_anchor_channel: SdJwtIssuanceEvidenceRecordProtocol,
+    /// Exact non-secret channel identifier required by v1.
+    pub external_anchor_channel_id: String,
+    /// Exact non-secret append-only log identifier required by v1.
+    pub external_anchor_log_id: String,
+    /// Exact out-of-band authenticated connector trust policy required by v1.
+    pub external_anchor_connector_policy: String,
+    /// Exact offline receipt signature scheme required by v1.
+    pub external_anchor_signature_scheme: String,
+    /// Exact signing-key identifier required by v1.
+    pub external_anchor_signing_key_id: String,
+    /// Exact signed-byte preimages for terminal and completion receipts.
+    pub external_anchor_signed_preimage_rule: String,
+    /// Closed grammar and size bound for a channel receipt locator.
+    pub external_anchor_receipt_id_rule: String,
+    /// Campaign uniqueness, equivocation, and replay behavior for anchor receipts.
+    pub external_anchor_replay_rule: String,
+    /// Independent expected-digest requirement that anchors the final head.
+    pub external_anchor_rule: String,
+}
+
 /// Fixed Criterion arguments for every fresh timing process.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceCriterionProtocol {
+    /// Exact portable logical argv vector in process-launch order.
+    pub logical_argv: Vec<String>,
     /// Criterion sample size.
     pub sample_size: u32,
+    /// Criterion bootstrap resamples used for its diagnostic estimates.
+    pub nresamples: u32,
     /// Criterion warm-up time in seconds.
     pub warm_up_seconds: u32,
     /// Criterion measurement time in seconds.
     pub measurement_seconds: u32,
     /// Criterion confidence level.
     pub confidence_level: f64,
+    /// Criterion sampling mode selected by the fixed benchmark.
+    pub sampling_mode: String,
+    /// Criterion baseline behavior used by every fresh home.
+    pub baseline_mode: String,
+    /// Criterion baseline directory name.
+    pub baseline_name: String,
     /// Whether plot generation is disabled.
     pub no_plot: bool,
     /// Statistic read from each Criterion estimates file.
     pub primary_statistic: String,
 }
 
-/// Fixed whole-superblock bootstrap protocol.
+/// Fixed campaign-wide global-round bootstrap protocol.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceBootstrapProtocol {
     /// Number of bootstrap replicates.
     pub replicates: u32,
@@ -465,16 +1061,39 @@ pub struct SdJwtIssuanceBootstrapProtocol {
     pub rng: String,
     /// Unsigned generator seed.
     pub seed: u64,
+    /// Whether the seed is used directly as the initial generator state.
+    pub seed_is_initial_state: bool,
+    /// Exact `SplitMix64` state transition and output transform.
+    pub rng_state_transition: String,
+    /// Number of round ordinals sampled for every replicate.
+    pub draws_per_replicate: u32,
+    /// Whether round ordinals are sampled with replacement.
+    pub sampling_method: String,
+    /// Exact rejection and modulo rule for an unbiased round index.
+    pub uniform_index_rule: String,
+    /// Lifetime of the generator state across all replicates.
+    pub stream_scope: String,
+    /// Fixed nesting used to consume accepted draws.
+    pub consumption_order: String,
+    /// State-consumption behavior for a rejected output.
+    pub rejected_output_rule: String,
     /// Quantile interpolation rule.
     pub quantile_method: String,
     /// Atomic bootstrap resampling unit.
     pub resampling_unit: String,
+    /// Scope receiving one common sampled round-index vector per replicate.
+    pub common_index_scope: String,
     /// Common simultaneous-band construction for the primary effect family.
     pub simultaneous_band: String,
+    /// Confidence-interval construction for primary effects.
+    pub primary_interval_rule: String,
+    /// Marginal interval construction for disclosure-only `O`.
+    pub diagnostic_o_interval_rule: String,
 }
 
 /// Index pairs and formulas defining the four paired log effects.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SdJwtIssuanceEffectProtocol {
     /// Sign convention for every ordered log-median difference.
     pub orientation: String,

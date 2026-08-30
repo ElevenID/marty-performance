@@ -14,6 +14,8 @@ use std::path::{Component, Path};
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, NaiveTime};
 use ed25519_dalek::{Signature, VerifyingKey};
+#[cfg(windows)]
+use fs_at::OpenOptions as AtOpenOptions;
 use marty_perf_schema::{
     ArtifactFingerprint, SdJwtIssuanceArtifactIndexProtocol, SdJwtIssuanceBootstrapProtocol,
     SdJwtIssuanceCriterionHomeProtocol, SdJwtIssuanceCriterionProtocol,
@@ -3068,6 +3070,578 @@ fn valid_completion_anchor_bytes(bytes: &[u8], verifying_key: &VerifyingKey) -> 
                 &receipt.signature_uppercase_hex_512,
             )
         })
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct FileIdentity {
+    volume: u64,
+    file: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileSnapshot {
+    identity: FileIdentity,
+    byte_length: u64,
+    link_count: u64,
+    change_token: [u64; 4],
+    readonly: bool,
+}
+
+#[cfg(unix)]
+fn handle_snapshot(
+    file: &fs::File,
+    require_directory: bool,
+    role: &'static str,
+) -> Result<FileSnapshot> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    anyhow::ensure!(
+        if require_directory {
+            metadata.file_type().is_dir()
+        } else {
+            metadata.file_type().is_file()
+        },
+        "analysis rejected: {role}"
+    );
+    Ok(FileSnapshot {
+        identity: FileIdentity {
+            volume: metadata.dev(),
+            file: metadata.ino(),
+        },
+        byte_length: metadata.len(),
+        link_count: metadata.nlink(),
+        change_token: [
+            metadata.mtime().cast_unsigned(),
+            metadata.mtime_nsec().cast_unsigned(),
+            metadata.ctime().cast_unsigned(),
+            metadata.ctime_nsec().cast_unsigned(),
+        ],
+        readonly: metadata.permissions().readonly(),
+    })
+}
+
+#[cfg(windows)]
+fn handle_snapshot(
+    file: &fs::File,
+    require_directory: bool,
+    role: &'static str,
+) -> Result<FileSnapshot> {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u64 = 0x0400;
+
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    let information = winapi_util::file::information(file)
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    let file_type =
+        winapi_util::file::typ(file).with_context(|| format!("analysis rejected: {role}"))?;
+    anyhow::ensure!(
+        file_type.is_disk()
+            && information.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && if require_directory {
+                metadata.file_type().is_dir()
+            } else {
+                metadata.file_type().is_file()
+            },
+        "analysis rejected: {role}"
+    );
+    Ok(FileSnapshot {
+        identity: FileIdentity {
+            volume: information.volume_serial_number(),
+            file: information.file_index(),
+        },
+        byte_length: information.file_size(),
+        link_count: information.number_of_links(),
+        change_token: [
+            information.creation_time().unwrap_or_default(),
+            information.last_write_time().unwrap_or_default(),
+            information.file_attributes(),
+            0,
+        ],
+        readonly: metadata.permissions().readonly(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn handle_snapshot(
+    _file: &fs::File,
+    _require_directory: bool,
+    role: &'static str,
+) -> Result<FileSnapshot> {
+    Err(anyhow::anyhow!("analysis rejected: {role}"))
+}
+
+fn verified_directory_identity(file: &fs::File, role: &'static str) -> Result<FileIdentity> {
+    Ok(handle_snapshot(file, true, role)?.identity)
+}
+
+fn verified_file_snapshot(
+    file: &fs::File,
+    maximum: u64,
+    role: &'static str,
+) -> Result<FileSnapshot> {
+    let snapshot = handle_snapshot(file, false, role)?;
+    anyhow::ensure!(
+        snapshot.link_count == 1 && snapshot.byte_length <= maximum,
+        "analysis rejected: {role}"
+    );
+    Ok(snapshot)
+}
+
+fn ensure_file_unchanged(file: &fs::File, before: FileSnapshot, role: &'static str) -> Result<()> {
+    let after = handle_snapshot(file, false, role)?;
+    anyhow::ensure!(
+        after == before && after.link_count == 1,
+        "analysis rejected: {role}"
+    );
+    Ok(())
+}
+
+fn ensure_exact_snapshot_byte_length(
+    actual: u64,
+    snapshot: FileSnapshot,
+    role: &'static str,
+) -> Result<()> {
+    anyhow::ensure!(actual == snapshot.byte_length, "analysis rejected: {role}");
+    Ok(())
+}
+
+fn rootless_components(path: &Path, role: &'static str) -> Result<Vec<OsString>> {
+    let components = path
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => Ok(value.to_os_string()),
+            _ => Err(anyhow::anyhow!("analysis rejected: {role}")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(!components.is_empty(), "analysis rejected: {role}");
+    Ok(components)
+}
+
+#[cfg(unix)]
+fn open_child_directory(
+    parent: &fs::File,
+    component: &OsString,
+    role: &'static str,
+) -> Result<fs::File> {
+    use rustix::fs::{openat, Mode, OFlags};
+
+    let descriptor = openat(
+        parent,
+        component.as_os_str(),
+        OFlags::RDONLY
+            | OFlags::DIRECTORY
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::NOCTTY
+            | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("analysis rejected: {role}"))?;
+    let directory = fs::File::from(descriptor);
+    verified_directory_identity(&directory, role)?;
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn open_child_directory(
+    parent: &fs::File,
+    component: &OsString,
+    role: &'static str,
+) -> Result<fs::File> {
+    let mut options = AtOpenOptions::default();
+    options.read(true).follow(false);
+    let directory = options
+        .open_dir_at(parent, component)
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    verified_directory_identity(&directory, role)?;
+    Ok(directory)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_child_directory(
+    _parent: &fs::File,
+    _component: &OsString,
+    role: &'static str,
+) -> Result<fs::File> {
+    Err(anyhow::anyhow!("analysis rejected: {role}"))
+}
+
+#[cfg(unix)]
+fn open_child_file(
+    parent: &fs::File,
+    component: &std::ffi::OsStr,
+    maximum: u64,
+    role: &'static str,
+) -> Result<OpenedInput> {
+    use rustix::fs::{openat, Mode, OFlags};
+
+    let descriptor = openat(
+        parent,
+        component,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("analysis rejected: {role}"))?;
+    let file = fs::File::from(descriptor);
+    let snapshot = verified_file_snapshot(&file, maximum, role)?;
+    Ok(OpenedInput { file, snapshot })
+}
+
+#[cfg(windows)]
+fn open_child_file(
+    parent: &fs::File,
+    component: &std::ffi::OsStr,
+    maximum: u64,
+    role: &'static str,
+) -> Result<OpenedInput> {
+    let mut options = AtOpenOptions::default();
+    options.read(true).follow(false);
+    let file = options
+        .open_at(parent, component)
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    let snapshot = verified_file_snapshot(&file, maximum, role)?;
+    Ok(OpenedInput { file, snapshot })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_child_file(
+    _parent: &fs::File,
+    _component: &std::ffi::OsStr,
+    _maximum: u64,
+    role: &'static str,
+) -> Result<OpenedInput> {
+    Err(anyhow::anyhow!("analysis rejected: {role}"))
+}
+
+#[cfg(unix)]
+fn absolute_root_and_components(
+    path: &Path,
+    role: &'static str,
+) -> Result<(fs::File, Vec<OsString>)> {
+    anyhow::ensure!(path.is_absolute(), "analysis rejected: {role}");
+    let mut components = path.components();
+    anyhow::ensure!(
+        matches!(components.next(), Some(Component::RootDir)),
+        "analysis rejected: {role}"
+    );
+    let remaining = components
+        .map(|component| match component {
+            Component::Normal(value) => Ok(value.to_os_string()),
+            _ => Err(anyhow::anyhow!("analysis rejected: {role}")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let root = fs::File::open("/").with_context(|| format!("analysis rejected: {role}"))?;
+    verified_directory_identity(&root, role)?;
+    Ok((root, remaining))
+}
+
+#[cfg(windows)]
+fn absolute_root_and_components(
+    path: &Path,
+    role: &'static str,
+) -> Result<(fs::File, Vec<OsString>)> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::path::Prefix;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    anyhow::ensure!(path.is_absolute(), "analysis rejected: {role}");
+    let mut components = path.components();
+    let drive = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter,
+            _ => return Err(anyhow::anyhow!("analysis rejected: {role}")),
+        },
+        _ => return Err(anyhow::anyhow!("analysis rejected: {role}")),
+    };
+    anyhow::ensure!(
+        matches!(components.next(), Some(Component::RootDir)),
+        "analysis rejected: {role}"
+    );
+    let remaining = components
+        .map(|component| match component {
+            Component::Normal(value)
+                if !value.encode_wide().any(|unit| unit == u16::from(b':')) =>
+            {
+                Ok(value.to_os_string())
+            }
+            _ => Err(anyhow::anyhow!("analysis rejected: {role}")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let volume_root = format!("{}:\\", char::from(drive));
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(volume_root)
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    verified_directory_identity(&root, role)?;
+    Ok((root, remaining))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn absolute_root_and_components(
+    _path: &Path,
+    role: &'static str,
+) -> Result<(fs::File, Vec<OsString>)> {
+    Err(anyhow::anyhow!("analysis rejected: {role}"))
+}
+
+fn open_absolute_directory_excluding(
+    path: &Path,
+    forbidden_directory: Option<FileIdentity>,
+    role: &'static str,
+) -> Result<fs::File> {
+    let (mut directory, components) = absolute_root_and_components(path, role)?;
+    anyhow::ensure!(
+        Some(verified_directory_identity(&directory, role)?) != forbidden_directory,
+        "analysis rejected: {role}"
+    );
+    for component in components {
+        directory = open_child_directory(&directory, &component, role)?;
+        anyhow::ensure!(
+            Some(verified_directory_identity(&directory, role)?) != forbidden_directory,
+            "analysis rejected: {role}"
+        );
+    }
+    Ok(directory)
+}
+
+fn open_absolute_directory(path: &Path, role: &'static str) -> Result<fs::File> {
+    open_absolute_directory_excluding(path, None, role)
+}
+
+fn open_absolute_file(
+    path: &Path,
+    maximum: u64,
+    forbidden_directory: Option<FileIdentity>,
+    role: &'static str,
+) -> Result<OpenedInput> {
+    let (mut directory, mut components) = absolute_root_and_components(path, role)?;
+    let file_name = components.pop().context("analysis rejected: input role")?;
+    let mut directory_identity = verified_directory_identity(&directory, role)?;
+    anyhow::ensure!(
+        Some(directory_identity) != forbidden_directory,
+        "analysis rejected: {role}"
+    );
+    for component in components {
+        directory = open_child_directory(&directory, &component, role)?;
+        directory_identity = verified_directory_identity(&directory, role)?;
+        anyhow::ensure!(
+            Some(directory_identity) != forbidden_directory,
+            "analysis rejected: {role}"
+        );
+    }
+    open_child_file(&directory, &file_name, maximum, role)
+}
+
+#[derive(Debug)]
+struct OpenedInput {
+    file: fs::File,
+    snapshot: FileSnapshot,
+}
+
+#[derive(Debug)]
+struct CampaignDirectory {
+    root: fs::File,
+    identity: FileIdentity,
+}
+
+impl CampaignDirectory {
+    fn open(path: &Path) -> Result<Self> {
+        let root = open_absolute_directory(path, "campaign root")?;
+        let identity = verified_directory_identity(&root, "campaign root")?;
+        Ok(Self { root, identity })
+    }
+
+    fn open_directory(&self, relative: &Path, role: &'static str) -> Result<fs::File> {
+        let mut directory = self
+            .root
+            .try_clone()
+            .with_context(|| format!("analysis rejected: {role}"))?;
+        for component in rootless_components(relative, role)? {
+            directory = open_child_directory(&directory, &component, role)?;
+        }
+        Ok(directory)
+    }
+
+    fn open_file(&self, relative: &Path, maximum: u64, role: &'static str) -> Result<OpenedInput> {
+        let mut components = rootless_components(relative, role)?;
+        let file_name = components.pop().context("analysis rejected: input role")?;
+        let mut directory = self
+            .root
+            .try_clone()
+            .with_context(|| format!("analysis rejected: {role}"))?;
+        for component in components {
+            directory = open_child_directory(&directory, &component, role)?;
+        }
+        open_child_file(&directory, &file_name, maximum, role)
+    }
+
+    fn validate_exact_directory_entries(
+        &self,
+        relative: &Path,
+        expected: &BTreeSet<OsString>,
+        role: &'static str,
+    ) -> Result<()> {
+        let directory = self.open_directory(relative, role)?;
+        let before = handle_snapshot(&directory, true, role)?;
+        let mut listing = directory
+            .try_clone()
+            .with_context(|| format!("analysis rejected: {role}"))?;
+        let validation = (|| -> Result<BTreeSet<OsString>> {
+            let mut entries = BTreeSet::new();
+            let mut observed = 0_usize;
+            for entry in fs_at::read_dir(&mut listing)
+                .with_context(|| format!("analysis rejected: {role}"))?
+            {
+                observed = observed
+                    .checked_add(1)
+                    .context("analysis rejected: directory inventory")?;
+                anyhow::ensure!(
+                    observed <= expected.len().saturating_add(2),
+                    "analysis rejected: {role}"
+                );
+                let entry = entry.with_context(|| format!("analysis rejected: {role}"))?;
+                let name = entry.name();
+                if name == "." || name == ".." {
+                    continue;
+                }
+                anyhow::ensure!(
+                    expected.contains(name) && entries.insert(name.to_os_string()),
+                    "analysis rejected: {role}"
+                );
+            }
+            Ok(entries)
+        })();
+        anyhow::ensure!(
+            before == handle_snapshot(&directory, true, role)?
+                && before == handle_snapshot(&listing, true, role)?,
+            "analysis rejected: {role}"
+        );
+        anyhow::ensure!(validation? == *expected, "analysis rejected: {role}");
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct AnalysisReadBudget {
+    charged_files: BTreeSet<FileIdentity>,
+    total_bytes: u64,
+}
+
+impl AnalysisReadBudget {
+    fn charge(&mut self, input: &OpenedInput) -> Result<()> {
+        if self.charged_files.contains(&input.snapshot.identity) {
+            return Ok(());
+        }
+        let total = self
+            .total_bytes
+            .checked_add(input.snapshot.byte_length)
+            .context("analysis rejected: total evidence bytes")?;
+        anyhow::ensure!(
+            total <= MAX_TOTAL_EVIDENCE_BYTES,
+            "analysis rejected: total evidence bytes"
+        );
+        self.total_bytes = total;
+        self.charged_files.insert(input.snapshot.identity);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn read_bounded(path: &Path, maximum: u64, role: &'static str) -> Result<Vec<u8>> {
+    let input = open_absolute_file(path, maximum, None, role)?;
+    read_opened_input(input, maximum, role)
+}
+
+fn read_opened_input(mut input: OpenedInput, maximum: u64, role: &'static str) -> Result<Vec<u8>> {
+    let read_limit = maximum
+        .checked_add(1)
+        .context("analysis rejected: compiled input limit")?;
+    let allocation =
+        usize::try_from(read_limit).context("analysis rejected: compiled input limit")?;
+    let mut bytes = Vec::with_capacity(allocation.min(64 * 1024));
+    {
+        let mut limited = (&mut input.file).take(read_limit);
+        limited
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("analysis rejected: {role}"))?;
+    }
+    let actual_length = u64::try_from(bytes.len()).context("analysis rejected: byte count")?;
+    anyhow::ensure!(actual_length <= maximum, "analysis rejected: {role}");
+    ensure_exact_snapshot_byte_length(actual_length, input.snapshot, role)?;
+    ensure_file_unchanged(&input.file, input.snapshot, role)?;
+    Ok(bytes)
+}
+
+fn read_campaign_input(
+    budget: &mut AnalysisReadBudget,
+    campaign: &CampaignDirectory,
+    relative: &Path,
+    maximum: u64,
+    role: &'static str,
+) -> Result<Vec<u8>> {
+    let input = campaign.open_file(relative, maximum, role)?;
+    budget.charge(&input)?;
+    read_opened_input(input, maximum, role)
+}
+
+fn fingerprint_reader(
+    file: &mut fs::File,
+    maximum: u64,
+    role: &'static str,
+) -> Result<ArtifactFingerprint> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("analysis rejected: {role}"))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("analysis rejected: {role}"))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(read).context("analysis rejected: byte count")?)
+            .context("analysis rejected: byte count")?;
+        anyhow::ensure!(total <= maximum, "analysis rejected: {role}");
+        hasher.update(&buffer[..read]);
+    }
+    Ok(ArtifactFingerprint {
+        sha256: hex::encode_upper(hasher.finalize()),
+        byte_length: total,
+    })
+}
+
+fn fingerprint_opened_input(
+    mut input: OpenedInput,
+    maximum: u64,
+    role: &'static str,
+) -> Result<ArtifactFingerprint> {
+    let fingerprint = fingerprint_reader(&mut input.file, maximum, role)?;
+    ensure_exact_snapshot_byte_length(fingerprint.byte_length, input.snapshot, role)?;
+    ensure_file_unchanged(&input.file, input.snapshot, role)?;
+    Ok(fingerprint)
+}
+
+fn fingerprint_campaign_file(
+    budget: &mut AnalysisReadBudget,
+    campaign: &CampaignDirectory,
+    relative: &Path,
+    maximum: u64,
+    role: &'static str,
+) -> Result<ArtifactFingerprint> {
+    let input = campaign.open_file(relative, maximum, role)?;
+    budget.charge(&input)?;
+    fingerprint_opened_input(input, maximum, role)
 }
 
 #[cfg(test)]
@@ -9344,5 +9918,164 @@ mod promoted_validation_primitives_tests {
             b"{}\n",
             &signing_key.verifying_key(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod handle_bound_reader_tests {
+    use super::*;
+
+    #[test]
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows read-only attributes must be cleared before deleting the temporary key"
+    )]
+    fn governed_inputs_reject_hardlinks_campaign_keys_and_short_reads() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let original = temporary.path().join("original.bin");
+        let linked = temporary.path().join("linked.bin");
+        fs::write(&original, b"bound bytes").expect("write original");
+        fs::hard_link(&original, &linked).expect("create hard link");
+        let error = open_absolute_file(&linked, 64, None, "hardlinked artifact")
+            .expect_err("hard-linked input must reject")
+            .to_string();
+        assert_eq!(error, "analysis rejected: hardlinked artifact");
+        assert!(!error.contains("linked.bin"));
+
+        fs::remove_file(&linked).expect("remove hard link");
+        let input = open_absolute_file(&original, 64, None, "short artifact")
+            .expect("open single-linked input");
+        assert!(ensure_exact_snapshot_byte_length(
+            input.snapshot.byte_length - 1,
+            input.snapshot,
+            "short artifact",
+        )
+        .is_err());
+        assert_eq!(
+            read_bounded(&original, 64, "bounded artifact").expect("bounded read"),
+            b"bound bytes"
+        );
+
+        let campaign_path = temporary.path().join("campaign");
+        fs::create_dir(&campaign_path).expect("campaign directory");
+        let campaign_key = campaign_path.join("key.bin");
+        fs::write(&campaign_key, [0x42; 32]).expect("campaign key");
+        let mut permissions = fs::metadata(&campaign_key)
+            .expect("key metadata")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&campaign_key, permissions).expect("readonly campaign key");
+        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
+        assert!(open_absolute_file(
+            &campaign_key,
+            32,
+            Some(campaign.identity),
+            "anchor trust root",
+        )
+        .is_err());
+        #[cfg(windows)]
+        {
+            let mut cleanup_permissions = fs::metadata(&campaign_key)
+                .expect("cleanup key metadata")
+                .permissions();
+            cleanup_permissions.set_readonly(false);
+            fs::set_permissions(&campaign_key, cleanup_permissions)
+                .expect("cleanup key permissions");
+        }
+    }
+
+    #[test]
+    fn exact_directory_inventory_rejects_extras_with_bounded_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let campaign_path = temporary.path().join("campaign");
+        let anchors_path = campaign_path.join("anchors");
+        fs::create_dir_all(&anchors_path).expect("anchor directory");
+        let expected = [
+            OsString::from("completion-anchor.json"),
+            OsString::from("terminal-observation-evidence.json"),
+            OsString::from("terminal-observation-receipt.json"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        for name in &expected {
+            fs::write(anchors_path.join(name), b"{}\n").expect("expected anchor");
+        }
+        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
+        campaign
+            .validate_exact_directory_entries(Path::new("anchors"), &expected, "anchor inventory")
+            .expect("exact inventory");
+        fs::write(anchors_path.join("junk.json"), b"{}\n").expect("junk anchor");
+        let error = campaign
+            .validate_exact_directory_entries(Path::new("anchors"), &expected, "anchor inventory")
+            .expect_err("overfilled inventory must reject")
+            .to_string();
+        assert_eq!(error, "analysis rejected: anchor inventory");
+        assert!(!error.contains("junk"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_directory_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let campaign_path = temporary.path().join("campaign");
+        let outside_path = temporary.path().join("outside");
+        fs::create_dir(&campaign_path).expect("campaign directory");
+        fs::create_dir(&outside_path).expect("outside directory");
+        fs::write(outside_path.join("artifact.json"), b"{}\n").expect("outside artifact");
+        symlink(&outside_path, campaign_path.join("linked")).expect("directory symlink");
+        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
+        assert!(campaign
+            .open_file(Path::new("linked/artifact.json"), 16, "linked artifact")
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governed_file_fifo_rejects_without_blocking() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use rustix::fs::{mkfifoat, Mode};
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let parent = fs::File::open(temporary.path()).expect("open temporary directory");
+        mkfifoat(&parent, "artifact.fifo", Mode::RUSR | Mode::WUSR).expect("create FIFO");
+        let fifo_path = temporary.path().join("artifact.fifo");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(open_absolute_file(&fifo_path, 16, None, "FIFO artifact").is_err())
+                .ok();
+        });
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)), Ok(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversed_directory_fifo_rejects_without_blocking() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use rustix::fs::{mkfifoat, Mode};
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let campaign_path = temporary.path().join("campaign");
+        fs::create_dir(&campaign_path).expect("campaign directory");
+        let parent = fs::File::open(&campaign_path).expect("open campaign directory");
+        mkfifoat(&parent, "linked", Mode::RUSR | Mode::WUSR).expect("create FIFO");
+        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(
+                    campaign
+                        .open_file(Path::new("linked/artifact.json"), 16, "FIFO directory")
+                        .is_err(),
+                )
+                .ok();
+        });
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)), Ok(true));
     }
 }

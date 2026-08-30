@@ -3299,6 +3299,136 @@ struct GenesisHeaderWire {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ContinuationHeaderWire {
+    schema: String,
+    campaign_id: String,
+    segment_ordinal: u32,
+    record_ordinal: u32,
+    utc_rfc3339_nanoseconds: String,
+    monotonic_nanoseconds: u64,
+    previous_segment_fingerprint: ArtifactFingerprint,
+    genesis_header_fingerprint: ArtifactFingerprint,
+    active_test_window_attestation_fingerprint: ArtifactFingerprint,
+    boot_identity_pseudonym: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ValiditySampleWire {
+    schema: String,
+    campaign_id: String,
+    segment_ordinal: u32,
+    record_ordinal: u32,
+    sample_ordinal: u64,
+    utc_rfc3339_nanoseconds: String,
+    monotonic_nanoseconds: u64,
+    boot_identity_pseudonym: String,
+    timing_state: String,
+    global_round_ordinal: RequiredNullable<u32>,
+    cell_ordinal: RequiredNullable<u32>,
+    expansion_position: RequiredNullable<u32>,
+    timing_process_id: RequiredNullable<String>,
+    total_cpu_percent: f64,
+    monitor_cpu_percent: f64,
+    benchmark_cpu_percent: f64,
+    unrelated_cpu_percent: f64,
+    available_memory_bytes: u64,
+    cpu_frequency_hz: u64,
+    maximum_temperature_millidegrees_celsius: i64,
+    throttle_flags: Vec<String>,
+    unrelated_process_set_fingerprint: ArtifactFingerprint,
+    active_test_window_attestation_fingerprint: ArtifactFingerprint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessIntentRecordWire {
+    schema: String,
+    campaign_id: String,
+    segment_ordinal: u32,
+    record_ordinal: u32,
+    event_ordinal: u64,
+    utc_rfc3339_nanoseconds: String,
+    monotonic_nanoseconds: u64,
+    global_round_ordinal: u32,
+    cell_ordinal: u32,
+    expansion_position: u32,
+    timing_process_id: String,
+    full_benchmark_id: String,
+    invocation_descriptor_fingerprint: ArtifactFingerprint,
+    criterion_home_initial_inventory_fingerprint: ArtifactFingerprint,
+    launch_barrier_token_fingerprint: ArtifactFingerprint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessStartRecordWire {
+    schema: String,
+    campaign_id: String,
+    segment_ordinal: u32,
+    record_ordinal: u32,
+    event_ordinal: u64,
+    utc_rfc3339_nanoseconds: String,
+    monotonic_nanoseconds: u64,
+    global_round_ordinal: u32,
+    cell_ordinal: u32,
+    expansion_position: u32,
+    timing_process_id: String,
+    process_identity_pseudonym: String,
+    full_benchmark_id: String,
+    process_intent_record_fingerprint: ArtifactFingerprint,
+    invocation_descriptor_fingerprint: ArtifactFingerprint,
+    launch_barrier_token_fingerprint: ArtifactFingerprint,
+    launch_barrier_ready_frame_fingerprint: ArtifactFingerprint,
+    active_test_window_attestation_fingerprint: ArtifactFingerprint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessFinishRecordWire {
+    schema: String,
+    campaign_id: String,
+    segment_ordinal: u32,
+    record_ordinal: u32,
+    event_ordinal: u64,
+    utc_rfc3339_nanoseconds: String,
+    monotonic_nanoseconds: u64,
+    global_round_ordinal: u32,
+    cell_ordinal: u32,
+    expansion_position: u32,
+    timing_process_id: String,
+    process_identity_pseudonym: String,
+    full_benchmark_id: String,
+    exit_code: i32,
+    termination_reason: String,
+    elapsed_monotonic_nanoseconds: u64,
+    stdout_after_ready_bytes: u64,
+    stderr_bytes: u64,
+    launch_barrier_receipt_fingerprint: ArtifactFingerprint,
+    criterion_home_final_inventory_fingerprint: ArtifactFingerprint,
+    criterion_artifact_fingerprint: ArtifactFingerprint,
+    route_artifact_fingerprint: ArtifactFingerprint,
+    artifacts_flushed_and_synced: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationTransitionWire {
+    schema: String,
+    campaign_id: String,
+    segment_ordinal: u32,
+    record_ordinal: u32,
+    event_ordinal: u64,
+    utc_rfc3339_nanoseconds: String,
+    monotonic_nanoseconds: u64,
+    previous_attestation_fingerprint: ArtifactFingerprint,
+    next_attestation_fingerprint: ArtifactFingerprint,
+    next_starts_at_rfc3339_nanoseconds: String,
+    next_expires_at_rfc3339_nanoseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct SegmentFooterWire {
     schema: String,
     campaign_id: String,
@@ -4584,18 +4714,43 @@ where
     anyhow::ensure!(canonical_json_envelope(bytes), "analysis rejected: {role}");
     let body = bytes
         .strip_suffix(b"\n")
-        .context("analysis rejected: segment record")?;
+        .ok_or_else(|| anyhow::anyhow!("analysis rejected: {role}"))?;
     let mut deserializer = serde_json::Deserializer::from_slice(body);
-    let value =
-        T::deserialize(&mut deserializer).with_context(|| format!("analysis rejected: {role}"))?;
+    let value = T::deserialize(&mut deserializer)
+        .map_err(|_| anyhow::anyhow!("analysis rejected: {role}"))?;
     deserializer
         .end()
-        .with_context(|| format!("analysis rejected: {role}"))?;
+        .map_err(|_| anyhow::anyhow!("analysis rejected: {role}"))?;
     let mut canonical =
-        serde_json::to_vec(&value).with_context(|| format!("analysis rejected: {role}"))?;
+        serde_json::to_vec(&value).map_err(|_| anyhow::anyhow!("analysis rejected: {role}"))?;
     canonical.push(b'\n');
     anyhow::ensure!(canonical == bytes, "analysis rejected: {role}");
     Ok(value)
+}
+
+fn validate_lifecycle_record_payload(bytes: &[u8], schema: &str, role: &'static str) -> Result<()> {
+    match schema {
+        "marty.performance/sd-jwt-issuance-validity-continuation/v1" => {
+            let _: ContinuationHeaderWire = parse_canonical_compact_line(bytes, role)?;
+        }
+        "marty.performance/sd-jwt-issuance-validity-sample/v1" => {
+            let _: ValiditySampleWire = parse_canonical_compact_line(bytes, role)?;
+        }
+        "marty.performance/sd-jwt-issuance-validity-process-intent/v1" => {
+            let _: ProcessIntentRecordWire = parse_canonical_compact_line(bytes, role)?;
+        }
+        "marty.performance/sd-jwt-issuance-validity-process-start/v1" => {
+            let _: ProcessStartRecordWire = parse_canonical_compact_line(bytes, role)?;
+        }
+        "marty.performance/sd-jwt-issuance-validity-process-finish/v1" => {
+            let _: ProcessFinishRecordWire = parse_canonical_compact_line(bytes, role)?;
+        }
+        "marty.performance/sd-jwt-issuance-validity-attestation-transition/v1" => {
+            let _: AttestationTransitionWire = parse_canonical_compact_line(bytes, role)?;
+        }
+        _ => anyhow::bail!("analysis rejected: {role}"),
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -4610,13 +4765,13 @@ impl SegmentPrefixState {
     fn observe(&mut self, bytes: &[u8], role: &'static str) -> Result<()> {
         let body = bytes
             .strip_suffix(b"\n")
-            .context("analysis rejected: segment record")?;
+            .ok_or_else(|| anyhow::anyhow!("analysis rejected: {role}"))?;
         let mut deserializer = serde_json::Deserializer::from_slice(body);
         let envelope = SegmentRecordEnvelope::deserialize(&mut deserializer)
-            .with_context(|| format!("analysis rejected: {role}"))?;
+            .map_err(|_| anyhow::anyhow!("analysis rejected: {role}"))?;
         deserializer
             .end()
-            .with_context(|| format!("analysis rejected: {role}"))?;
+            .map_err(|_| anyhow::anyhow!("analysis rejected: {role}"))?;
         anyhow::ensure!(
             valid_utc_rfc3339_nanoseconds(&envelope.utc_rfc3339_nanoseconds)
                 && envelope.record_ordinal == self.records_seen
@@ -4649,6 +4804,7 @@ impl SegmentPrefixState {
                 }
                 _ => return Err(anyhow::anyhow!("analysis rejected: {role}")),
             };
+            validate_lifecycle_record_payload(bytes, &envelope.schema, role)?;
             *count = count
                 .checked_add(1)
                 .context("analysis rejected: segment record count")?;
@@ -4664,6 +4820,9 @@ impl SegmentPrefixState {
                     },
                 "analysis rejected: {role}"
             );
+            if envelope.segment_ordinal != 0 {
+                validate_lifecycle_record_payload(bytes, &envelope.schema, role)?;
+            }
             self.header = Some(envelope);
         }
         self.last_monotonic_nanoseconds = Some(monotonic_nanoseconds);
@@ -5884,6 +6043,7 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
             "build_input_inventory_and_streamed_archive",
             "anchored_genesis_build_receipt_and_binary_binding",
             "terminal_segment_structural_envelope_and_footer_summary_binding",
+            "inspected_genesis_and_terminal_segment_lifecycle_payload_shape_and_canonicality",
             "offline_ed25519_anchor_signatures_and_chronology",
         ],
         artifact_integrity_status: "valid",
@@ -5891,7 +6051,7 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
         production_threshold_activation: false,
         limitations: vec![
             "one_selected_route_artifact_only",
-            "intermediate_segment_chain_and_lifecycle_record_payload_shape_canonicality_and_semantics_not_analyzed",
+            "intermediate_segment_chain_and_lifecycle_payload_semantics_not_analyzed",
             "first_quiet_window_evidence_content_and_build_order_not_analyzed",
             "retained_build_tree_offline_probe_not_reexecuted",
             "operator_selected_anchor_key_trust_provenance_not_established",
@@ -11464,6 +11624,386 @@ mod tests {
         source_archive_fingerprint(&segment[start..])
     }
 
+    fn compact_fixture_record<T: Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(value).expect("fixture record JSON");
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one explicit fixture corpus mirrors all six frozen lifecycle wire layouts"
+    )]
+    fn lifecycle_payload_fixture_records() -> Vec<(String, Vec<u8>)> {
+        const CAMPAIGN_ID: &str = "018f4f9a-3f5b-4ae8-8a37-11c9fc12d001";
+        const UTC: &str = "2026-08-29T12:35:00.000000000Z";
+        let fingerprint = source_archive_fingerprint(b"lifecycle payload fixture");
+        let continuation = ContinuationHeaderWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-continuation/v1".to_owned(),
+            campaign_id: CAMPAIGN_ID.to_owned(),
+            segment_ordinal: 1,
+            record_ordinal: 0,
+            utc_rfc3339_nanoseconds: UTC.to_owned(),
+            monotonic_nanoseconds: 1,
+            previous_segment_fingerprint: fingerprint.clone(),
+            genesis_header_fingerprint: fingerprint.clone(),
+            active_test_window_attestation_fingerprint: fingerprint.clone(),
+            boot_identity_pseudonym: "A".repeat(64),
+        };
+        let sample = ValiditySampleWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-sample/v1".to_owned(),
+            campaign_id: CAMPAIGN_ID.to_owned(),
+            segment_ordinal: 0,
+            record_ordinal: 1,
+            sample_ordinal: 0,
+            utc_rfc3339_nanoseconds: UTC.to_owned(),
+            monotonic_nanoseconds: 2,
+            boot_identity_pseudonym: "A".repeat(64),
+            timing_state: "idle".to_owned(),
+            global_round_ordinal: super::RequiredNullable(None),
+            cell_ordinal: super::RequiredNullable(None),
+            expansion_position: super::RequiredNullable(None),
+            timing_process_id: super::RequiredNullable(None),
+            total_cpu_percent: 1.0,
+            monitor_cpu_percent: 0.1,
+            benchmark_cpu_percent: 0.0,
+            unrelated_cpu_percent: 0.2,
+            available_memory_bytes: 8 * 1024 * 1024 * 1024,
+            cpu_frequency_hz: 3_200_000_000,
+            maximum_temperature_millidegrees_celsius: 42_125,
+            throttle_flags: vec!["none".to_owned()],
+            unrelated_process_set_fingerprint: fingerprint.clone(),
+            active_test_window_attestation_fingerprint: fingerprint.clone(),
+        };
+        let intent = ProcessIntentRecordWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-process-intent/v1".to_owned(),
+            campaign_id: CAMPAIGN_ID.to_owned(),
+            segment_ordinal: 0,
+            record_ordinal: 2,
+            event_ordinal: 0,
+            utc_rfc3339_nanoseconds: UTC.to_owned(),
+            monotonic_nanoseconds: 3,
+            global_round_ordinal: 0,
+            cell_ordinal: 0,
+            expansion_position: 0,
+            timing_process_id: "r00-c00-e0".to_owned(),
+            full_benchmark_id: "sd_jwt_issuance/fixture/serial".to_owned(),
+            invocation_descriptor_fingerprint: fingerprint.clone(),
+            criterion_home_initial_inventory_fingerprint: fingerprint.clone(),
+            launch_barrier_token_fingerprint: fingerprint.clone(),
+        };
+        let start = ProcessStartRecordWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-process-start/v1".to_owned(),
+            campaign_id: CAMPAIGN_ID.to_owned(),
+            segment_ordinal: 0,
+            record_ordinal: 3,
+            event_ordinal: 1,
+            utc_rfc3339_nanoseconds: UTC.to_owned(),
+            monotonic_nanoseconds: 4,
+            global_round_ordinal: 0,
+            cell_ordinal: 0,
+            expansion_position: 0,
+            timing_process_id: "r00-c00-e0".to_owned(),
+            process_identity_pseudonym: "B".repeat(64),
+            full_benchmark_id: "sd_jwt_issuance/fixture/serial".to_owned(),
+            process_intent_record_fingerprint: fingerprint.clone(),
+            invocation_descriptor_fingerprint: fingerprint.clone(),
+            launch_barrier_token_fingerprint: fingerprint.clone(),
+            launch_barrier_ready_frame_fingerprint: fingerprint.clone(),
+            active_test_window_attestation_fingerprint: fingerprint.clone(),
+        };
+        let finish = ProcessFinishRecordWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-process-finish/v1".to_owned(),
+            campaign_id: CAMPAIGN_ID.to_owned(),
+            segment_ordinal: 0,
+            record_ordinal: 4,
+            event_ordinal: 2,
+            utc_rfc3339_nanoseconds: UTC.to_owned(),
+            monotonic_nanoseconds: 5,
+            global_round_ordinal: 0,
+            cell_ordinal: 0,
+            expansion_position: 0,
+            timing_process_id: "r00-c00-e0".to_owned(),
+            process_identity_pseudonym: "B".repeat(64),
+            full_benchmark_id: "sd_jwt_issuance/fixture/serial".to_owned(),
+            exit_code: 0,
+            termination_reason: "exited".to_owned(),
+            elapsed_monotonic_nanoseconds: 1,
+            stdout_after_ready_bytes: 0,
+            stderr_bytes: 0,
+            launch_barrier_receipt_fingerprint: fingerprint.clone(),
+            criterion_home_final_inventory_fingerprint: fingerprint.clone(),
+            criterion_artifact_fingerprint: fingerprint.clone(),
+            route_artifact_fingerprint: fingerprint.clone(),
+            artifacts_flushed_and_synced: true,
+        };
+        let transition = AttestationTransitionWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-attestation-transition/v1"
+                .to_owned(),
+            campaign_id: CAMPAIGN_ID.to_owned(),
+            segment_ordinal: 0,
+            record_ordinal: 5,
+            event_ordinal: 3,
+            utc_rfc3339_nanoseconds: UTC.to_owned(),
+            monotonic_nanoseconds: 6,
+            previous_attestation_fingerprint: fingerprint.clone(),
+            next_attestation_fingerprint: fingerprint,
+            next_starts_at_rfc3339_nanoseconds: UTC.to_owned(),
+            next_expires_at_rfc3339_nanoseconds: "2026-08-30T00:35:00.000000000Z".to_owned(),
+        };
+        vec![
+            (
+                continuation.schema.clone(),
+                compact_fixture_record(&continuation),
+            ),
+            (sample.schema.clone(), compact_fixture_record(&sample)),
+            (intent.schema.clone(), compact_fixture_record(&intent)),
+            (start.schema.clone(), compact_fixture_record(&start)),
+            (finish.schema.clone(), compact_fixture_record(&finish)),
+            (
+                transition.schema.clone(),
+                compact_fixture_record(&transition),
+            ),
+        ]
+    }
+
+    fn reorder_schema_and_campaign_id(bytes: &[u8]) -> Vec<u8> {
+        let campaign_start = bytes
+            .windows(b",\"campaign_id\"".len())
+            .position(|window| window == b",\"campaign_id\"")
+            .expect("campaign field");
+        let segment_start = bytes
+            .windows(b",\"segment_ordinal\"".len())
+            .position(|window| window == b",\"segment_ordinal\"")
+            .expect("segment field");
+        let mut reordered = Vec::with_capacity(bytes.len());
+        reordered.push(b'{');
+        reordered.extend_from_slice(&bytes[campaign_start + 1..segment_start]);
+        reordered.push(b',');
+        reordered.extend_from_slice(&bytes[1..campaign_start]);
+        reordered.extend_from_slice(&bytes[segment_start..bytes.len() - 2]);
+        reordered.extend_from_slice(b"}\n");
+        reordered
+    }
+
+    fn lifecycle_prefix_state_before(
+        records: &[(String, Vec<u8>)],
+        target_position: usize,
+    ) -> SegmentPrefixState {
+        let mut state = SegmentPrefixState::default();
+        if target_position == 0 {
+            return state;
+        }
+        state
+            .observe(
+                b"{\"schema\":\"marty.performance/sd-jwt-issuance-validity-genesis/v1\",\"campaign_id\":\"018f4f9a-3f5b-4ae8-8a37-11c9fc12d001\",\"segment_ordinal\":0,\"record_ordinal\":0,\"utc_rfc3339_nanoseconds\":\"2026-08-29T12:35:00.000000000Z\",\"monotonic_nanoseconds\":1}\n",
+                "lifecycle corpus",
+            )
+            .expect("fixture genesis envelope");
+        for (_, record) in records.iter().skip(1).take(target_position - 1) {
+            state
+                .observe(record, "lifecycle corpus")
+                .expect("valid prior lifecycle record");
+        }
+        state
+    }
+
+    fn ordered_json_object_keys(bytes: &[u8]) -> Vec<String> {
+        struct OrderedKeys(Vec<String>);
+
+        impl<'de> Deserialize<'de> for OrderedKeys {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct OrderedKeysVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for OrderedKeysVisitor {
+                    type Value = OrderedKeys;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a JSON object")
+                    }
+
+                    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+                    where
+                        A: serde::de::MapAccess<'de>,
+                    {
+                        let mut keys = Vec::new();
+                        while let Some(key) = map.next_key::<String>()? {
+                            keys.push(key);
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                        Ok(OrderedKeys(keys))
+                    }
+                }
+
+                deserializer.deserialize_map(OrderedKeysVisitor)
+            }
+        }
+
+        serde_json::from_slice::<OrderedKeys>(bytes)
+            .expect("fixture JSON object")
+            .0
+    }
+
+    #[test]
+    fn inspected_lifecycle_payloads_require_complete_deny_unknown_canonical_bytes() {
+        const CAMPAIGN_FIELD: &str = ",\"campaign_id\":\"018f4f9a-3f5b-4ae8-8a37-11c9fc12d001\"";
+        let records = lifecycle_payload_fixture_records();
+        let protocols = record_protocols();
+        for (position, (schema, valid)) in records.iter().enumerate() {
+            let protocol = match schema.as_str() {
+                "marty.performance/sd-jwt-issuance-validity-continuation/v1" => {
+                    &protocols.continuation_header
+                }
+                "marty.performance/sd-jwt-issuance-validity-sample/v1" => &protocols.sample,
+                "marty.performance/sd-jwt-issuance-validity-process-intent/v1" => {
+                    &protocols.process_intent
+                }
+                "marty.performance/sd-jwt-issuance-validity-process-start/v1" => {
+                    &protocols.process_start
+                }
+                "marty.performance/sd-jwt-issuance-validity-process-finish/v1" => {
+                    &protocols.process_finish
+                }
+                "marty.performance/sd-jwt-issuance-validity-attestation-transition/v1" => {
+                    &protocols.attestation_transition
+                }
+                _ => panic!("unexpected lifecycle fixture schema"),
+            };
+            assert_eq!(
+                ordered_json_object_keys(valid),
+                protocol
+                    .fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect::<Vec<_>>()
+            );
+            validate_lifecycle_record_payload(valid, schema, "lifecycle corpus")
+                .expect("valid complete payload");
+            lifecycle_prefix_state_before(&records, position)
+                .observe(valid, "lifecycle corpus")
+                .expect("valid payload through segment inspection");
+
+            let mut unknown = valid.clone();
+            unknown.truncate(unknown.len() - 2);
+            unknown.extend_from_slice(b",\"unknown\":true}\n");
+            let missing = std::str::from_utf8(valid)
+                .expect("fixture UTF-8")
+                .replacen(CAMPAIGN_FIELD, "", 1)
+                .into_bytes();
+            let reordered = reorder_schema_and_campaign_id(valid);
+            let mut noncanonical = valid.clone();
+            noncanonical.insert(1, b' ');
+
+            let valid_value: serde_json::Value =
+                serde_json::from_slice(valid).expect("valid fixture JSON");
+            let reordered_value: serde_json::Value =
+                serde_json::from_slice(&reordered).expect("reordered fixture JSON");
+            assert_eq!(reordered_value, valid_value);
+            assert_ne!(reordered.as_slice(), valid.as_slice());
+
+            let mut invalid_payloads = vec![unknown, missing, reordered, noncanonical];
+            if schema == "marty.performance/sd-jwt-issuance-validity-sample/v1" {
+                let missing_nullable = std::str::from_utf8(valid)
+                    .expect("fixture UTF-8")
+                    .replacen(",\"global_round_ordinal\":null", "", 1)
+                    .into_bytes();
+                assert_ne!(missing_nullable.as_slice(), valid.as_slice());
+                invalid_payloads.push(missing_nullable);
+            }
+
+            for invalid in invalid_payloads {
+                let _: serde_json::Value =
+                    serde_json::from_slice(&invalid).expect("mutation remains valid JSON");
+                let error = validate_lifecycle_record_payload(&invalid, schema, "lifecycle corpus")
+                    .expect_err("invalid lifecycle payload must reject")
+                    .to_string();
+                assert_eq!(error, "analysis rejected: lifecycle corpus");
+                assert!(!error.contains(CAMPAIGN_FIELD));
+                let error = lifecycle_prefix_state_before(&records, position)
+                    .observe(&invalid, "lifecycle corpus")
+                    .expect_err("segment inspection must reject invalid payload")
+                    .to_string();
+                assert_eq!(error, "analysis rejected: lifecycle corpus");
+            }
+        }
+    }
+
+    fn assert_opaque_lifecycle_error(error: &anyhow::Error, sentinels: &[&str]) {
+        const SAFE_ERROR: &str = "analysis rejected: lifecycle confidentiality corpus";
+        assert_eq!(error.to_string(), SAFE_ERROR);
+        assert_eq!(error.chain().count(), 1, "untrusted cause must be erased");
+        let rendered = [
+            format!("{error}"),
+            format!("{error:#}"),
+            format!("{error:?}"),
+            error
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": "),
+        ];
+        for output in rendered {
+            assert!(output.contains(SAFE_ERROR));
+            for sentinel in sentinels {
+                assert!(
+                    !output.contains(sentinel),
+                    "rendered error disclosed sentinel {sentinel}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_serde_failures_erase_untrusted_causes_from_rendered_error_chains() {
+        const UNKNOWN_FIELD: &str = "CALLER_PRIVATE_UNKNOWN_FIELD_7F43";
+        const MALFORMED_VALUE: &str = "CALLER_PRIVATE_MALFORMED_VALUE_91C2";
+        const SERDE_DETAILS: [&str; 5] = [
+            "unknown field",
+            "invalid type",
+            "expected u32",
+            " at line ",
+            "Caused by:",
+        ];
+        let records = lifecycle_payload_fixture_records();
+
+        let (sample_schema, sample) = &records[1];
+        let mut unknown = sample.clone();
+        unknown.truncate(unknown.len() - 2);
+        unknown.extend_from_slice(format!(",\"{UNKNOWN_FIELD}\":true}}\n").as_bytes());
+        let error = validate_lifecycle_record_payload(
+            &unknown,
+            sample_schema,
+            "lifecycle confidentiality corpus",
+        )
+        .expect_err("unknown lifecycle field must reject");
+        let mut forbidden = SERDE_DETAILS.to_vec();
+        forbidden.push(UNKNOWN_FIELD);
+        assert_opaque_lifecycle_error(&error, &forbidden);
+
+        let (_, continuation) = &records[0];
+        let malformed = std::str::from_utf8(continuation)
+            .expect("continuation fixture UTF-8")
+            .replacen(
+                "\"record_ordinal\":0",
+                &format!("\"record_ordinal\":\"{MALFORMED_VALUE}\""),
+                1,
+            )
+            .into_bytes();
+        assert_ne!(malformed.as_slice(), continuation.as_slice());
+        let error = SegmentPrefixState::default()
+            .observe(&malformed, "lifecycle confidentiality corpus")
+            .expect_err("malformed envelope value must reject");
+        let mut forbidden = SERDE_DETAILS.to_vec();
+        forbidden.push(MALFORMED_VALUE);
+        assert_opaque_lifecycle_error(&error, &forbidden);
+    }
+
     impl AnalyzerCampaignFixture {
         fn request<'a>(&'a self, output: &'a Path) -> IssuanceAnalysisRequest<'a> {
             IssuanceAnalysisRequest {
@@ -12205,8 +12745,16 @@ mod tests {
             .any(
                 |value| value == "terminal_segment_structural_envelope_and_footer_summary_binding"
             ));
+        assert!(report["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .any(|value| {
+                value
+                    == "inspected_genesis_and_terminal_segment_lifecycle_payload_shape_and_canonicality"
+            }));
         for limitation in [
-            "intermediate_segment_chain_and_lifecycle_record_payload_shape_canonicality_and_semantics_not_analyzed",
+            "intermediate_segment_chain_and_lifecycle_payload_semantics_not_analyzed",
             "failed_post_publication_verification_may_leave_a_nonactivating_create_new_report",
         ] {
             assert!(report["limitations"]
@@ -12640,21 +13188,41 @@ mod tests {
             )
             .into_bytes()
         };
-        let schemas = [
-            "marty.performance/sd-jwt-issuance-validity-genesis/v1",
-            "marty.performance/sd-jwt-issuance-validity-sample/v1",
-            "marty.performance/sd-jwt-issuance-validity-process-intent/v1",
-            "marty.performance/sd-jwt-issuance-validity-process-start/v1",
-            "marty.performance/sd-jwt-issuance-validity-process-finish/v1",
-            "marty.performance/sd-jwt-issuance-validity-attestation-transition/v1",
-        ];
-        let mut segment = Vec::new();
-        for (ordinal, schema) in schemas.into_iter().enumerate() {
-            segment.extend_from_slice(&record_line(
-                schema,
-                u32::try_from(ordinal).expect("record ordinal"),
-                u64::try_from(ordinal + 1).expect("record monotonic"),
-            ));
+        let fixture_fingerprint = source_archive_fingerprint(b"streamed segment fixture");
+        let genesis = GenesisHeaderWire {
+            schema: "marty.performance/sd-jwt-issuance-validity-genesis/v1".to_owned(),
+            campaign_id: "018f4f9a-3f5b-4ae8-8a37-11c9fc12d001".to_owned(),
+            segment_ordinal: 0,
+            record_ordinal: 0,
+            utc_rfc3339_nanoseconds: "2026-08-29T12:35:00.000000000Z".to_owned(),
+            monotonic_nanoseconds: 1,
+            plan_fingerprint: fixture_fingerprint.clone(),
+            manifest_fingerprint: fixture_fingerprint.clone(),
+            fixed_binary_fingerprint: fixture_fingerprint.clone(),
+            fixed_binary_build_receipt_fingerprint: fixture_fingerprint.clone(),
+            monitor_binary_fingerprint: fixture_fingerprint.clone(),
+            controller_binary_fingerprint: fixture_fingerprint.clone(),
+            controller_configuration_fingerprint: fixture_fingerprint.clone(),
+            monitor_configuration_fingerprint: fixture_fingerprint.clone(),
+            external_anchor_channel_configuration_fingerprint: fixture_fingerprint.clone(),
+            source_commit: "0000000000000000000000000000000000000000".to_owned(),
+            source_tree: "0000000000000000000000000000000000000000".to_owned(),
+            source_archive_fingerprint: fixture_fingerprint.clone(),
+            cargo_lock_fingerprint: fixture_fingerprint.clone(),
+            rustc_verbose_version: "rustc fixture".to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            build_profile: "bench".to_owned(),
+            host_identity_fingerprint: fixture_fingerprint.clone(),
+            boot_identity_pseudonym: "A".repeat(64),
+            hardware_profile_fingerprint: fixture_fingerprint.clone(),
+            validity_thresholds_fingerprint: fixture_fingerprint.clone(),
+            first_quiet_window_evidence_fingerprint: fixture_fingerprint.clone(),
+            initial_test_window_attestation_fingerprint: fixture_fingerprint.clone(),
+            baseline_unrelated_process_set_fingerprint: fixture_fingerprint,
+        };
+        let mut segment = compact_fixture_record(&genesis);
+        for (_, record) in lifecycle_payload_fixture_records().into_iter().skip(1) {
+            segment.extend_from_slice(&record);
         }
         let prefix_fingerprint = fingerprint(&segment).expect("prefix fingerprint");
         let footer = SegmentFooterWire {

@@ -1,11 +1,19 @@
 //! Frozen, deterministic planning for SD-JWT issuance qualification.
+#![allow(
+    dead_code,
+    unused_imports,
+    reason = "temporary until the analyzer pipeline commit wires the promoted layers"
+)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path};
 
 use anyhow::{Context, Result};
+use chrono::{NaiveDate, NaiveTime};
+use ed25519_dalek::{Signature, VerifyingKey};
 use marty_perf_schema::{
     ArtifactFingerprint, SdJwtIssuanceArtifactIndexProtocol, SdJwtIssuanceBootstrapProtocol,
     SdJwtIssuanceCriterionHomeProtocol, SdJwtIssuanceCriterionProtocol,
@@ -20,7 +28,10 @@ use marty_perf_schema::{
     SdJwtIssuanceRunValidityProtocol, SdJwtIssuanceRunValidityRecordProtocols,
     MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES,
 };
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use uuid::{Uuid, Variant, Version};
 
 const MANIFEST_SCHEMA: &str = "sd_jwt_issuance_qualification_manifest_v1";
 const PLAN_SCHEMA: &str = "marty.performance/sd-jwt-issuance-plan/v3";
@@ -49,8 +60,8 @@ const MAX_FIXED_BUILD_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_TOTAL_EVIDENCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const FIXED_BUILD_ROOT_WINDOWS: &str = "M:/marty-cdla-build-v1";
 const FIXED_BUILD_ROOT_NON_WINDOWS: &str = "/marty-cdla-build-v1";
-#[cfg(test)]
 const FIXED_BUILD_INPUT_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-BUILD-INPUT-ARCHIVE-V1\n";
+const SOURCE_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-SOURCE-ARCHIVE-V1\n";
 
 const SUPERBLOCK_ORDERS: [&str; 20] = [
     "ABBA_FIRST",
@@ -1897,6 +1908,1166 @@ fn validate_plan_schema(plan: &SdJwtIssuanceQualificationPlan) -> Result<()> {
         "qualification plan schema must be the globally clustered v3 contract"
     );
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct RouteBatchModel {
+    ordinal: u64,
+    selector: SelectorBatchModel,
+    chunk_size: Option<u64>,
+    chunks: Option<Vec<(u64, u64, u64)>>,
+}
+
+#[derive(Clone, Debug)]
+struct RouteRecordModel {
+    requested: &'static str,
+    effective: &'static str,
+    executor_batches: Option<u64>,
+    serial_batches: Option<u64>,
+    native_batches: Option<u64>,
+    budget_fallback_batches: Option<u64>,
+    max_native_worker_count: u64,
+    worker_cap: u64,
+    host_available_parallelism: u64,
+    ready_batches: Option<Vec<RouteBatchModel>>,
+}
+
+#[derive(Clone, Debug)]
+enum GateState {
+    Skipped,
+    Evaluated,
+}
+
+#[derive(Clone, Debug)]
+struct SelectorBatchModel {
+    jobs: u64,
+    work: Option<u64>,
+    work_status: &'static str,
+    work_gate: GateState,
+    available: Option<u64>,
+    selected: Option<u64>,
+    parallelism_gate: GateState,
+    budget_gate: GateState,
+    budget_result: &'static str,
+    mode: &'static str,
+    reason: &'static str,
+    leased: Option<u64>,
+    static_layout: Option<()>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RequiredNullable<T>(Option<T>);
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RouteStaticChunkWire {
+    ordinal: u64,
+    job_count: u64,
+    estimated_work_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RouteBatchWire {
+    ordinal: u64,
+    job_count: u64,
+    estimated_work_bytes: RequiredNullable<u64>,
+    work_estimate_status: String,
+    work_gate_evaluated: bool,
+    parallelism_gate_evaluated: bool,
+    budget_gate_evaluated: bool,
+    available_parallelism: RequiredNullable<u64>,
+    selected_worker_count: RequiredNullable<u64>,
+    leased_worker_count: RequiredNullable<u64>,
+    budget_acquisition_result: String,
+    selected_mode: String,
+    selection_reason: String,
+    static_chunk_size: RequiredNullable<u64>,
+    static_chunks: RequiredNullable<Vec<RouteStaticChunkWire>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RouteRecordWire {
+    schema: String,
+    benchmark_id: String,
+    fixture_id: String,
+    stage: String,
+    requested: String,
+    effective: String,
+    executor_batches: RequiredNullable<u64>,
+    serial_batches: RequiredNullable<u64>,
+    native_batches: RequiredNullable<u64>,
+    budget_fallback_batches: RequiredNullable<u64>,
+    max_native_worker_count: u64,
+    worker_cap: u64,
+    host_available_parallelism: u64,
+    work_estimator_version: String,
+    static_partition_rule_version: String,
+    ready_batches: RequiredNullable<Vec<RouteBatchWire>>,
+}
+
+fn route_literal(value: &str) -> Option<&'static str> {
+    match value {
+        "serial_oracle" => Some("serial_oracle"),
+        "adaptive_candidate" => Some("adaptive_candidate"),
+        "bounded_native" => Some("bounded_native"),
+        "mixed_native_and_serial" => Some("mixed_native_and_serial"),
+        "ready_batch_serial_fallback" => Some("ready_batch_serial_fallback"),
+        "budget_serial_fallback" => Some("budget_serial_fallback"),
+        "target_serial_fallback" => Some("target_serial_fallback"),
+        "not_evaluated" => Some("not_evaluated"),
+        "available" => Some("available"),
+        "overflow" => Some("overflow"),
+        "acquired" => Some("acquired"),
+        "unavailable" => Some("unavailable"),
+        "serial" => Some("serial"),
+        "native_parallel" => Some("native_parallel"),
+        "below_min_jobs" => Some("below_min_jobs"),
+        "work_estimate_overflow" => Some("work_estimate_overflow"),
+        "below_min_estimated_work_bytes" => Some("below_min_estimated_work_bytes"),
+        "insufficient_available_parallelism" => Some("insufficient_available_parallelism"),
+        "worker_budget_unavailable" => Some("worker_budget_unavailable"),
+        _ => None,
+    }
+}
+
+fn route_batches_from_wire(values: Vec<RouteBatchWire>) -> Option<Vec<RouteBatchModel>> {
+    let mut batches = Vec::with_capacity(values.len());
+    for value in values {
+        let work_status = route_literal(&value.work_estimate_status)?;
+        let budget_result = route_literal(&value.budget_acquisition_result)?;
+        let mode = route_literal(&value.selected_mode)?;
+        let reason = route_literal(&value.selection_reason)?;
+        let chunks = value.static_chunks.0.map(|chunks| {
+            chunks
+                .into_iter()
+                .map(|chunk| (chunk.ordinal, chunk.job_count, chunk.estimated_work_bytes))
+                .collect()
+        });
+        let static_layout = (value.static_chunk_size.0.is_some() && chunks.is_some()).then_some(());
+        batches.push(RouteBatchModel {
+            ordinal: value.ordinal,
+            selector: SelectorBatchModel {
+                jobs: value.job_count,
+                work: value.estimated_work_bytes.0,
+                work_status,
+                work_gate: if value.work_gate_evaluated {
+                    GateState::Evaluated
+                } else {
+                    GateState::Skipped
+                },
+                available: value.available_parallelism.0,
+                selected: value.selected_worker_count.0,
+                parallelism_gate: if value.parallelism_gate_evaluated {
+                    GateState::Evaluated
+                } else {
+                    GateState::Skipped
+                },
+                budget_gate: if value.budget_gate_evaluated {
+                    GateState::Evaluated
+                } else {
+                    GateState::Skipped
+                },
+                budget_result,
+                mode,
+                reason,
+                leased: value.leased_worker_count.0,
+                static_layout,
+            },
+            chunk_size: value.static_chunk_size.0,
+            chunks,
+        });
+    }
+    Some(batches)
+}
+
+fn valid_route_wire_bytes(
+    bytes: &[u8],
+    expected_benchmark_id: &str,
+    expected_fixture_id: &str,
+    expected_stage: &str,
+    expected_requested: &str,
+    expected_worker_cap: u64,
+    expected_host_available_parallelism: u64,
+) -> bool {
+    if bytes.len() > 1024 * 1024 || !bytes.ends_with(b"\n") || bytes.ends_with(b"\n\n") {
+        return false;
+    }
+    let body = &bytes[..bytes.len() - 1];
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let Ok(wire) = RouteRecordWire::deserialize(&mut deserializer) else {
+        return false;
+    };
+    if deserializer.end().is_err() {
+        return false;
+    }
+    let Ok(mut canonical) = serde_json::to_vec(&wire) else {
+        return false;
+    };
+    canonical.push(b'\n');
+    if canonical != bytes
+        || wire.schema != ROUTE_SCHEMA
+        || wire.benchmark_id != expected_benchmark_id
+        || wire.fixture_id != expected_fixture_id
+        || wire.stage != expected_stage
+        || wire.requested != expected_requested
+        || wire.work_estimator_version != WORK_ESTIMATOR_VERSION
+        || wire.static_partition_rule_version != STATIC_PARTITION_RULE_VERSION
+    {
+        return false;
+    }
+    let Some(requested) = route_literal(&wire.requested) else {
+        return false;
+    };
+    let Some(effective) = route_literal(&wire.effective) else {
+        return false;
+    };
+    let batches = match wire.ready_batches.0 {
+        None => None,
+        Some(values) => Some(match route_batches_from_wire(values) {
+            Some(batches) => batches,
+            None => return false,
+        }),
+    };
+    valid_route_record(
+        &RouteRecordModel {
+            requested,
+            effective,
+            executor_batches: wire.executor_batches.0,
+            serial_batches: wire.serial_batches.0,
+            native_batches: wire.native_batches.0,
+            budget_fallback_batches: wire.budget_fallback_batches.0,
+            max_native_worker_count: wire.max_native_worker_count,
+            worker_cap: wire.worker_cap,
+            host_available_parallelism: wire.host_available_parallelism,
+            ready_batches: batches,
+        },
+        expected_worker_cap,
+        expected_host_available_parallelism,
+    )
+}
+
+fn valid_selector_batch(
+    batch: &SelectorBatchModel,
+    worker_cap: u64,
+    host_available_parallelism: u64,
+) -> bool {
+    if batch.jobs == 0 || !(1..=64).contains(&worker_cap) || host_available_parallelism == 0 {
+        return false;
+    }
+    let work_skipped = batch.work.is_none()
+        && batch.work_status == "not_evaluated"
+        && matches!(batch.work_gate, GateState::Skipped);
+    let work_overflow = batch.work.is_none()
+        && batch.work_status == "overflow"
+        && matches!(batch.work_gate, GateState::Evaluated);
+    let work_available = batch
+        .work
+        .filter(|_| batch.work_status == "available")
+        .filter(|_| matches!(batch.work_gate, GateState::Evaluated));
+    let parallel_skipped = batch.available.is_none()
+        && batch.selected.is_none()
+        && matches!(batch.parallelism_gate, GateState::Skipped);
+    let expected_selected = host_available_parallelism.min(worker_cap).min(batch.jobs);
+    let parallel_evaluated = batch.available == Some(host_available_parallelism)
+        && batch.selected == Some(expected_selected)
+        && matches!(batch.parallelism_gate, GateState::Evaluated);
+    let budget_skipped =
+        matches!(batch.budget_gate, GateState::Skipped) && batch.budget_result == "not_evaluated";
+    let budget_unavailable =
+        matches!(batch.budget_gate, GateState::Evaluated) && batch.budget_result == "unavailable";
+    let budget_acquired =
+        matches!(batch.budget_gate, GateState::Evaluated) && batch.budget_result == "acquired";
+    let serial_static =
+        batch.mode == "serial" && batch.leased.is_none() && batch.static_layout.is_none();
+    match batch.reason {
+        "below_min_jobs" => {
+            batch.jobs < 2 && work_skipped && parallel_skipped && budget_skipped && serial_static
+        }
+        "work_estimate_overflow" => {
+            batch.jobs >= 2 && work_overflow && parallel_skipped && budget_skipped && serial_static
+        }
+        "below_min_estimated_work_bytes" => {
+            batch.jobs >= 2
+                && work_available.is_some_and(|work| work < 1)
+                && parallel_skipped
+                && budget_skipped
+                && serial_static
+        }
+        "insufficient_available_parallelism" => {
+            batch.jobs >= 2
+                && work_available.is_some_and(|work| work >= 1)
+                && parallel_evaluated
+                && expected_selected < 2
+                && budget_skipped
+                && serial_static
+        }
+        "worker_budget_unavailable" => {
+            batch.jobs >= 2
+                && work_available.is_some_and(|work| work >= 1)
+                && parallel_evaluated
+                && expected_selected >= 2
+                && budget_unavailable
+                && serial_static
+        }
+        "bounded_native" => {
+            batch.jobs >= 2
+                && work_available.is_some_and(|work| work >= 1)
+                && parallel_evaluated
+                && expected_selected >= 2
+                && budget_acquired
+                && batch.mode == "native_parallel"
+                && batch.leased == batch.selected
+                && batch.static_layout.is_some()
+        }
+        _ => false,
+    }
+}
+
+fn valid_static_chunks(
+    batch: &RouteBatchModel,
+    worker_cap: u64,
+    host_available_parallelism: u64,
+) -> bool {
+    if !valid_selector_batch(&batch.selector, worker_cap, host_available_parallelism) {
+        return false;
+    }
+    if batch.selector.mode != "native_parallel" {
+        return batch.chunk_size.is_none() && batch.chunks.is_none();
+    }
+    let (Some(workers), Some(leased), Some(work), Some(size), Some(chunks)) = (
+        batch.selector.selected,
+        batch.selector.leased,
+        batch.selector.work,
+        batch.chunk_size,
+        batch.chunks.as_ref(),
+    ) else {
+        return false;
+    };
+    if workers == 0 || batch.selector.jobs == 0 {
+        return false;
+    }
+    let Some(expected_size) = batch
+        .selector
+        .jobs
+        .checked_add(workers - 1)
+        .map(|value| value / workers)
+    else {
+        return false;
+    };
+    let Some(expected_count) = batch
+        .selector
+        .jobs
+        .checked_add(expected_size - 1)
+        .map(|value| value / expected_size)
+    else {
+        return false;
+    };
+    leased == workers
+        && expected_count <= workers
+        && size == expected_size
+        && u64::try_from(chunks.len()) == Ok(expected_count)
+        && chunks
+            .iter()
+            .enumerate()
+            .all(|(index, (ordinal, jobs, _))| {
+                *ordinal == index as u64
+                    && *jobs > 0
+                    && *jobs <= size
+                    && (index + 1 == chunks.len() || *jobs == size)
+            })
+        && chunks
+            .iter()
+            .try_fold(0_u64, |sum, chunk| sum.checked_add(chunk.1))
+            == Some(batch.selector.jobs)
+        && chunks
+            .iter()
+            .try_fold(0_u64, |sum, chunk| sum.checked_add(chunk.2))
+            == Some(work)
+}
+
+fn valid_route_record(
+    record: &RouteRecordModel,
+    expected_worker_cap: u64,
+    expected_host_available_parallelism: u64,
+) -> bool {
+    if record.worker_cap != expected_worker_cap
+        || record.host_available_parallelism != expected_host_available_parallelism
+        || !(1..=64).contains(&record.worker_cap)
+        || record.host_available_parallelism == 0
+    {
+        return false;
+    }
+    let Some(batches) = record.ready_batches.as_ref() else {
+        let branch_valid = (record.requested == "serial_oracle"
+            && record.effective == "serial_oracle")
+            || (record.requested == "adaptive_candidate"
+                && record.effective == "target_serial_fallback"
+                && record.worker_cap == 1);
+        return branch_valid
+            && record.executor_batches.is_none()
+            && record.serial_batches.is_none()
+            && record.native_batches.is_none()
+            && record.budget_fallback_batches.is_none()
+            && record.max_native_worker_count == 0;
+    };
+    if record.worker_cap == 1 {
+        return false;
+    }
+    let executor = batches.len() as u64;
+    let native = batches
+        .iter()
+        .filter(|batch| batch.selector.mode == "native_parallel")
+        .count() as u64;
+    let serial = executor - native;
+    let budget = batches
+        .iter()
+        .filter(|batch| batch.selector.reason == "worker_budget_unavailable")
+        .count() as u64;
+    let maximum = batches
+        .iter()
+        .filter_map(|batch| batch.selector.leased)
+        .max()
+        .unwrap_or(0);
+    let effective = if native > 0 && serial > 0 {
+        "mixed_native_and_serial"
+    } else if native > 0 {
+        "bounded_native"
+    } else if budget > 0 {
+        "budget_serial_fallback"
+    } else {
+        "ready_batch_serial_fallback"
+    };
+    record.requested == "adaptive_candidate"
+        && record.effective == effective
+        && record.executor_batches == Some(executor)
+        && record.serial_batches == Some(serial)
+        && record.native_batches == Some(native)
+        && record.budget_fallback_batches == Some(budget)
+        && record.max_native_worker_count == maximum
+        && budget <= serial
+        && maximum <= record.worker_cap
+        && batches.iter().enumerate().all(|(ordinal, batch)| {
+            batch.ordinal == ordinal as u64
+                && valid_static_chunks(batch, record.worker_cap, record.host_available_parallelism)
+        })
+}
+
+fn valid_uppercase_hex(value: &str, characters: usize) -> bool {
+    value.len() == characters
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+}
+
+fn valid_lowercase_hex(value: &str, characters: usize) -> bool {
+    value.len() == characters
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SourceArchiveManifestWire {
+    schema: String,
+    git_object_format: String,
+    source_commit: String,
+    source_tree: String,
+    entry_count: u32,
+    entries: Vec<SourceArchiveEntryWire>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SourceArchiveEntryWire {
+    repository_relative_path: String,
+    git_mode: String,
+    git_object_id: String,
+    artifact_fingerprint: ArtifactFingerprint,
+}
+
+fn windows_reserved_device_stem(value: &str) -> bool {
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+fn valid_source_archive_segment(segment: &str) -> bool {
+    let portable = segment.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'@' | b'+' | b'-')
+    });
+    portable
+        && !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.eq_ignore_ascii_case(".git")
+        && !segment.ends_with('.')
+        && !windows_reserved_device_stem(segment)
+        && usize::try_from(MAX_SOURCE_ARCHIVE_PATH_SEGMENT_V1_BYTES)
+            .is_ok_and(|maximum| segment.len() <= maximum)
+}
+
+fn valid_source_archive_path(path: &str) -> bool {
+    usize::try_from(MAX_SOURCE_ARCHIVE_PATH_V1_BYTES)
+        .is_ok_and(|maximum| (1..=maximum).contains(&path.len()))
+        && !path.starts_with('/')
+        && {
+            let segments = path.split('/').collect::<Vec<_>>();
+            u32::try_from(segments.len()).is_ok_and(|count| {
+                count <= MAX_SOURCE_ARCHIVE_PATH_SEGMENTS
+                    && segments.into_iter().all(valid_source_archive_segment)
+            })
+        }
+}
+
+enum SourcePathChild {
+    Directory { name: String, node: usize },
+    File { name: String, entry: usize },
+}
+
+#[derive(Default)]
+struct SourcePathNode {
+    children_by_folded_name: BTreeMap<String, SourcePathChild>,
+}
+
+fn add_derived_component_bytes(total: &mut u64, segment: &str, maximum: u64) -> Option<()> {
+    *total = total.checked_add(u64::try_from(segment.len()).ok()?)?;
+    (*total <= maximum).then_some(())
+}
+
+fn build_source_path_tree(
+    entries: &[SourceArchiveEntryWire],
+    maximum_nodes: usize,
+    maximum_component_bytes: u64,
+) -> Option<Vec<SourcePathNode>> {
+    if maximum_nodes == 0 {
+        return None;
+    }
+    let mut nodes = vec![SourcePathNode::default()];
+    let mut component_bytes = 0_u64;
+    for (entry_index, entry) in entries.iter().enumerate() {
+        if !valid_source_archive_path(&entry.repository_relative_path) {
+            return None;
+        }
+        let segments = entry
+            .repository_relative_path
+            .split('/')
+            .collect::<Vec<_>>();
+        let (file_name, directories) = segments.split_last()?;
+        let mut parent = 0_usize;
+        for segment in directories {
+            let folded = segment.to_ascii_lowercase();
+            let existing = nodes[parent].children_by_folded_name.get(&folded);
+            if let Some(SourcePathChild::Directory { name, node }) = existing {
+                if name != segment {
+                    return None;
+                }
+                parent = *node;
+                continue;
+            }
+            if existing.is_some() || nodes.len() >= maximum_nodes {
+                return None;
+            }
+            add_derived_component_bytes(&mut component_bytes, segment, maximum_component_bytes)?;
+            let child = nodes.len();
+            nodes.push(SourcePathNode::default());
+            nodes[parent].children_by_folded_name.insert(
+                folded,
+                SourcePathChild::Directory {
+                    name: (*segment).to_owned(),
+                    node: child,
+                },
+            );
+            parent = child;
+        }
+        let folded = file_name.to_ascii_lowercase();
+        if nodes[parent].children_by_folded_name.contains_key(&folded) {
+            return None;
+        }
+        add_derived_component_bytes(&mut component_bytes, file_name, maximum_component_bytes)?;
+        nodes[parent].children_by_folded_name.insert(
+            folded,
+            SourcePathChild::File {
+                name: (*file_name).to_owned(),
+                entry: entry_index,
+            },
+        );
+    }
+    Some(nodes)
+}
+
+fn source_archive_paths_are_materializable(entries: &[SourceArchiveEntryWire]) -> bool {
+    usize::try_from(MAX_SOURCE_ARCHIVE_DERIVED_DIRECTORY_NODES).is_ok_and(|maximum_nodes| {
+        build_source_path_tree(
+            entries,
+            maximum_nodes,
+            MAX_SOURCE_ARCHIVE_DERIVED_COMPONENT_BYTES,
+        )
+        .is_some()
+    })
+}
+
+fn git_object_id(kind: &str, body: &[u8]) -> [u8; 20] {
+    let header = format!("{kind} {}\0", body.len());
+    let mut hasher = Sha1::new();
+    hasher.update(header.as_bytes());
+    hasher.update(body);
+    hasher.finalize().into()
+}
+
+fn canonical_unsigned_decimal(value: &[u8]) -> Option<u64> {
+    if value.is_empty()
+        || !value.iter().all(u8::is_ascii_digit)
+        || (value.len() > 1 && value.starts_with(b"0"))
+    {
+        return None;
+    }
+    value.iter().try_fold(0_u64, |parsed, byte| {
+        parsed.checked_mul(10)?.checked_add(u64::from(*byte - b'0'))
+    })
+}
+
+fn valid_git_timezone(value: &[u8]) -> bool {
+    if value.len() != 5
+        || !matches!(value[0], b'+' | b'-')
+        || !value[1..].iter().all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    let hours = (value[1] - b'0') * 10 + value[2] - b'0';
+    let minutes = (value[3] - b'0') * 10 + value[4] - b'0';
+    hours <= 23 && minutes <= 59 && !(hours == 0 && minutes == 0 && value[0] == b'-')
+}
+
+fn split_last_ascii_space(value: &[u8]) -> Option<(&[u8], &[u8])> {
+    let index = value.iter().rposition(|byte| *byte == b' ')?;
+    Some((&value[..index], &value[index + 1..]))
+}
+
+fn git_commit_committer_timestamp(commit: &[u8], expected_tree: &str) -> Option<u64> {
+    let header_end = commit.windows(2).position(|pair| pair == b"\n\n")?;
+    let headers = &commit[..header_end];
+    if headers.contains(&b'\r') || headers.contains(&0) {
+        return None;
+    }
+    let mut lines = headers.split(|byte| *byte == b'\n');
+    let expected_tree_header = format!("tree {expected_tree}");
+    (lines.next()? == expected_tree_header.as_bytes()).then_some(())?;
+    let mut tree_headers = 1_u32;
+    let mut committer_timestamp = None;
+    for line in lines {
+        if line.starts_with(b"tree ") {
+            tree_headers = tree_headers.checked_add(1)?;
+        }
+        let Some(committer) = line.strip_prefix(b"committer ") else {
+            continue;
+        };
+        if committer_timestamp.is_some() {
+            return None;
+        }
+        let (identity_and_timestamp, timezone) = split_last_ascii_space(committer)?;
+        let (identity, timestamp) = split_last_ascii_space(identity_and_timestamp)?;
+        if identity.is_empty()
+            || !identity.contains(&b'<')
+            || !identity.ends_with(b">")
+            || !valid_git_timezone(timezone)
+        {
+            return None;
+        }
+        committer_timestamp = Some(canonical_unsigned_decimal(timestamp)?);
+    }
+    (tree_headers == 1).then_some(committer_timestamp?)
+}
+
+fn reconstructed_source_tree_with_limits(
+    entries: &[SourceArchiveEntryWire],
+    contents: &[&[u8]],
+    maximum_nodes: usize,
+    maximum_component_bytes: u64,
+) -> Option<[u8; 20]> {
+    if entries.len() != contents.len() {
+        return None;
+    }
+    let nodes = build_source_path_tree(entries, maximum_nodes, maximum_component_bytes)?;
+    let mut tree_ids = vec![[0_u8; 20]; nodes.len()];
+    for node_index in (0..nodes.len()).rev() {
+        let mut components = Vec::<(Vec<u8>, String, String, [u8; 20])>::new();
+        for child in nodes[node_index].children_by_folded_name.values() {
+            match child {
+                SourcePathChild::File { name, entry } => {
+                    let source_entry = entries.get(*entry)?;
+                    let content = *contents.get(*entry)?;
+                    let object_id = git_object_id("blob", content);
+                    if hex::encode(object_id) != source_entry.git_object_id {
+                        return None;
+                    }
+                    let mut sort_key = name.as_bytes().to_vec();
+                    sort_key.push(0);
+                    components.push((
+                        sort_key,
+                        name.clone(),
+                        source_entry.git_mode.clone(),
+                        object_id,
+                    ));
+                }
+                SourcePathChild::Directory { name, node } => {
+                    let object_id = *tree_ids.get(*node)?;
+                    let mut sort_key = name.as_bytes().to_vec();
+                    sort_key.push(b'/');
+                    components.push((sort_key, name.clone(), "40000".to_owned(), object_id));
+                }
+            }
+        }
+        components.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut tree_body = Vec::new();
+        for (_, name, mode, object_id) in components {
+            tree_body.extend_from_slice(mode.as_bytes());
+            tree_body.push(b' ');
+            tree_body.extend_from_slice(name.as_bytes());
+            tree_body.push(0);
+            tree_body.extend_from_slice(&object_id);
+        }
+        tree_ids[node_index] = git_object_id("tree", &tree_body);
+    }
+    tree_ids.first().copied()
+}
+
+fn reconstructed_source_tree(
+    entries: &[SourceArchiveEntryWire],
+    contents: &[&[u8]],
+) -> Option<[u8; 20]> {
+    usize::try_from(MAX_SOURCE_ARCHIVE_DERIVED_DIRECTORY_NODES)
+        .ok()
+        .and_then(|maximum_nodes| {
+            reconstructed_source_tree_with_limits(
+                entries,
+                contents,
+                maximum_nodes,
+                MAX_SOURCE_ARCHIVE_DERIVED_COMPONENT_BYTES,
+            )
+        })
+}
+
+fn take_u64_be(bytes: &[u8], cursor: &mut usize) -> Option<usize> {
+    let end = cursor.checked_add(8)?;
+    let encoded: [u8; 8] = bytes.get(*cursor..end)?.try_into().ok()?;
+    *cursor = end;
+    usize::try_from(u64::from_be_bytes(encoded)).ok()
+}
+
+fn take_bounded<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    length: usize,
+    maximum: usize,
+) -> Option<&'a [u8]> {
+    if length > maximum {
+        return None;
+    }
+    let end = cursor.checked_add(length)?;
+    let value = bytes.get(*cursor..end)?;
+    *cursor = end;
+    Some(value)
+}
+
+fn parse_source_archive_manifest(bytes: &[u8]) -> Option<SourceArchiveManifestWire> {
+    if !bytes.ends_with(b"\n") {
+        return None;
+    }
+    let manifest = serde_json::from_slice::<SourceArchiveManifestWire>(bytes).ok()?;
+    let mut canonical = serde_json::to_vec_pretty(&manifest).ok()?;
+    canonical.push(b'\n');
+    let valid = canonical == bytes
+        && manifest.schema == "marty.performance/sd-jwt-issuance-source-archive-manifest/v1"
+        && manifest.git_object_format == "sha1"
+        && valid_lowercase_hex(&manifest.source_commit, 40)
+        && valid_lowercase_hex(&manifest.source_tree, 40)
+        && (1..=MAX_SOURCE_ARCHIVE_V1_ENTRIES).contains(&manifest.entry_count)
+        && usize::try_from(manifest.entry_count) == Ok(manifest.entries.len())
+        && source_archive_paths_are_materializable(&manifest.entries)
+        && manifest.entries.iter().all(|entry| {
+            valid_source_archive_path(&entry.repository_relative_path)
+                && matches!(entry.git_mode.as_str(), "100644" | "100755")
+                && valid_lowercase_hex(&entry.git_object_id, 40)
+                && valid_artifact_fingerprint(&entry.artifact_fingerprint)
+        })
+        && manifest.entries.windows(2).all(|pair| {
+            pair[0].repository_relative_path.as_bytes()
+                < pair[1].repository_relative_path.as_bytes()
+        });
+    valid.then_some(manifest)
+}
+
+#[derive(Clone)]
+struct ValidatedSourceArchive {
+    manifest: SourceArchiveManifestWire,
+    committer_timestamp: u64,
+}
+
+fn validate_source_archive_bytes(
+    bytes: &[u8],
+    expected_outer_fingerprint: &ArtifactFingerprint,
+    expected_cargo_lock_fingerprint: &ArtifactFingerprint,
+) -> Option<ValidatedSourceArchive> {
+    let maximum_archive_bytes = usize::try_from(MAX_SOURCE_ARCHIVE_V1_BYTES).ok()?;
+    let maximum_manifest_bytes = usize::try_from(MAX_SOURCE_ARCHIVE_MANIFEST_V1_BYTES).ok()?;
+    let maximum_commit_bytes = usize::try_from(MAX_SOURCE_ARCHIVE_COMMIT_V1_BYTES).ok()?;
+    if bytes.len() > maximum_archive_bytes
+        || fingerprint(bytes).ok().as_ref() != Some(expected_outer_fingerprint)
+        || !bytes.starts_with(SOURCE_ARCHIVE_MAGIC)
+    {
+        return None;
+    }
+    let mut cursor = SOURCE_ARCHIVE_MAGIC.len();
+    let manifest_length = take_u64_be(bytes, &mut cursor)?;
+    let manifest_bytes = take_bounded(bytes, &mut cursor, manifest_length, maximum_manifest_bytes)?;
+    let manifest = parse_source_archive_manifest(manifest_bytes)?;
+    let commit_length = take_u64_be(bytes, &mut cursor)?;
+    let commit = take_bounded(bytes, &mut cursor, commit_length, maximum_commit_bytes)?;
+    let mut contents = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let content_length = take_u64_be(bytes, &mut cursor)?;
+        let content = take_bounded(bytes, &mut cursor, content_length, maximum_archive_bytes)?;
+        if fingerprint(content).ok().as_ref() != Some(&entry.artifact_fingerprint) {
+            return None;
+        }
+        contents.push(content);
+    }
+    let source_tree = hex::encode(reconstructed_source_tree(&manifest.entries, &contents)?);
+    let cargo_lock_matches = manifest
+        .entries
+        .iter()
+        .zip(&contents)
+        .find(|(entry, _)| entry.repository_relative_path == "Cargo.lock")
+        .is_some_and(|(entry, content)| {
+            entry.artifact_fingerprint == *expected_cargo_lock_fingerprint
+                && fingerprint(content).ok().as_ref() == Some(expected_cargo_lock_fingerprint)
+        });
+    let committer_timestamp = git_commit_committer_timestamp(commit, &source_tree)?;
+    (cursor == bytes.len()
+        && source_tree == manifest.source_tree
+        && hex::encode(git_object_id("commit", commit)) == manifest.source_commit
+        && cargo_lock_matches)
+        .then_some(ValidatedSourceArchive {
+            manifest,
+            committer_timestamp,
+        })
+}
+
+fn fingerprint(bytes: &[u8]) -> Result<ArtifactFingerprint> {
+    Ok(ArtifactFingerprint {
+        sha256: hex::encode_upper(Sha256::digest(bytes)),
+        byte_length: u64::try_from(bytes.len()).context("artifact byte length overflow")?,
+    })
+}
+
+fn valid_artifact_fingerprint(value: &ArtifactFingerprint) -> bool {
+    valid_uppercase_hex(&value.sha256, 64)
+}
+
+fn valid_receipt_id(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn fixed_decimal(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value.checked_mul(10)?.checked_add(u32::from(*byte - b'0'))
+    })
+}
+
+fn valid_utc_rfc3339_nanoseconds(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 30
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'.'
+        || bytes[29] != b'Z'
+    {
+        return false;
+    }
+    let Some(year) = fixed_decimal(&bytes[0..4]).and_then(|value| i32::try_from(value).ok()) else {
+        return false;
+    };
+    let Some(month) = fixed_decimal(&bytes[5..7]) else {
+        return false;
+    };
+    let Some(day) = fixed_decimal(&bytes[8..10]) else {
+        return false;
+    };
+    let Some(hour) = fixed_decimal(&bytes[11..13]) else {
+        return false;
+    };
+    let Some(minute) = fixed_decimal(&bytes[14..16]) else {
+        return false;
+    };
+    let Some(second) = fixed_decimal(&bytes[17..19]) else {
+        return false;
+    };
+    let Some(nanosecond) = fixed_decimal(&bytes[20..29]) else {
+        return false;
+    };
+    year >= 1
+        && NaiveDate::from_ymd_opt(year, month, day).is_some()
+        && NaiveTime::from_hms_nano_opt(hour, minute, second, nanosecond).is_some()
+}
+
+#[derive(Serialize)]
+struct TerminalObservationUnsigned<'a> {
+    schema: &'a str,
+    campaign_id: &'a str,
+    channel_id: &'a str,
+    log_id: &'a str,
+    campaign_append_ordinal: u64,
+    channel_clock_session_id: &'a str,
+    channel_monotonic_nanoseconds: u64,
+    observed_at_utc_rfc3339_nanoseconds: &'a str,
+    channel_receipt_id: &'a str,
+    challenge_uppercase_hex_256: &'a str,
+    terminal_segment_fingerprint: ArtifactFingerprint,
+    terminal_footer_monotonic_nanoseconds: u64,
+    controller_request_monotonic_nanoseconds: u64,
+    signing_key_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct CompletionAnchorUnsigned<'a> {
+    schema: &'a str,
+    campaign_id: &'a str,
+    channel_id: &'a str,
+    log_id: &'a str,
+    campaign_append_ordinal: u64,
+    channel_clock_session_id: &'a str,
+    channel_monotonic_nanoseconds: u64,
+    published_at_utc_rfc3339_nanoseconds: &'a str,
+    channel_receipt_id: &'a str,
+    challenge_uppercase_hex_256: &'a str,
+    completion_fingerprint: ArtifactFingerprint,
+    terminal_segment_fingerprint: ArtifactFingerprint,
+    terminal_observation_evidence_fingerprint: ArtifactFingerprint,
+    signing_key_id: &'a str,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalObservationReceiptWire {
+    schema: String,
+    campaign_id: String,
+    channel_id: String,
+    log_id: String,
+    campaign_append_ordinal: u64,
+    channel_clock_session_id: String,
+    channel_monotonic_nanoseconds: u64,
+    observed_at_utc_rfc3339_nanoseconds: String,
+    channel_receipt_id: String,
+    challenge_uppercase_hex_256: String,
+    terminal_segment_fingerprint: ArtifactFingerprint,
+    terminal_footer_monotonic_nanoseconds: u64,
+    controller_request_monotonic_nanoseconds: u64,
+    signing_key_id: String,
+    signature_uppercase_hex_512: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompletionAnchorWire {
+    schema: String,
+    campaign_id: String,
+    channel_id: String,
+    log_id: String,
+    campaign_append_ordinal: u64,
+    channel_clock_session_id: String,
+    channel_monotonic_nanoseconds: u64,
+    published_at_utc_rfc3339_nanoseconds: String,
+    channel_receipt_id: String,
+    challenge_uppercase_hex_256: String,
+    completion_fingerprint: ArtifactFingerprint,
+    terminal_segment_fingerprint: ArtifactFingerprint,
+    terminal_observation_evidence_fingerprint: ArtifactFingerprint,
+    signing_key_id: String,
+    signature_uppercase_hex_512: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalObservationEvidenceWire {
+    schema: String,
+    campaign_id: String,
+    terminal_observation_receipt_fingerprint: ArtifactFingerprint,
+    controller_receipt_observed_monotonic_nanoseconds: u64,
+}
+
+fn signed_json_preimage(domain_with_nul: &[u8], unsigned_json: &[u8]) -> Option<Vec<u8>> {
+    let unsigned_length = u64::try_from(unsigned_json.len()).ok()?;
+    let capacity = domain_with_nul
+        .len()
+        .checked_add(8)?
+        .checked_add(unsigned_json.len())?;
+    let mut preimage = Vec::with_capacity(capacity);
+    preimage.extend_from_slice(domain_with_nul);
+    preimage.extend_from_slice(&unsigned_length.to_be_bytes());
+    preimage.extend_from_slice(unsigned_json);
+    Some(preimage)
+}
+
+fn strict_signature_verifies(
+    verifying_key: &VerifyingKey,
+    preimage: &[u8],
+    signature_uppercase_hex: &str,
+) -> bool {
+    if !valid_uppercase_hex(signature_uppercase_hex, 128) {
+        return false;
+    }
+    let Ok(signature_bytes) = hex::decode(signature_uppercase_hex) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+        return false;
+    };
+    verifying_key.verify_strict(preimage, &signature).is_ok()
+}
+
+fn canonical_pretty_bytes<T: Serialize>(value: &T) -> Option<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(value).ok()?;
+    bytes.push(b'\n');
+    Some(bytes)
+}
+
+fn terminal_receipt_preimage(receipt: &TerminalObservationReceiptWire) -> Option<Vec<u8>> {
+    let unsigned = TerminalObservationUnsigned {
+        schema: &receipt.schema,
+        campaign_id: &receipt.campaign_id,
+        channel_id: &receipt.channel_id,
+        log_id: &receipt.log_id,
+        campaign_append_ordinal: receipt.campaign_append_ordinal,
+        channel_clock_session_id: &receipt.channel_clock_session_id,
+        channel_monotonic_nanoseconds: receipt.channel_monotonic_nanoseconds,
+        observed_at_utc_rfc3339_nanoseconds: &receipt.observed_at_utc_rfc3339_nanoseconds,
+        channel_receipt_id: &receipt.channel_receipt_id,
+        challenge_uppercase_hex_256: &receipt.challenge_uppercase_hex_256,
+        terminal_segment_fingerprint: receipt.terminal_segment_fingerprint.clone(),
+        terminal_footer_monotonic_nanoseconds: receipt.terminal_footer_monotonic_nanoseconds,
+        controller_request_monotonic_nanoseconds: receipt.controller_request_monotonic_nanoseconds,
+        signing_key_id: &receipt.signing_key_id,
+    };
+    let unsigned_json = serde_json::to_vec(&unsigned).ok()?;
+    signed_json_preimage(b"MARTY-SD-JWT-TERMINAL-OBSERVATION-V1\0", &unsigned_json)
+}
+
+fn completion_anchor_preimage(receipt: &CompletionAnchorWire) -> Option<Vec<u8>> {
+    let unsigned = CompletionAnchorUnsigned {
+        schema: &receipt.schema,
+        campaign_id: &receipt.campaign_id,
+        channel_id: &receipt.channel_id,
+        log_id: &receipt.log_id,
+        campaign_append_ordinal: receipt.campaign_append_ordinal,
+        channel_clock_session_id: &receipt.channel_clock_session_id,
+        channel_monotonic_nanoseconds: receipt.channel_monotonic_nanoseconds,
+        published_at_utc_rfc3339_nanoseconds: &receipt.published_at_utc_rfc3339_nanoseconds,
+        channel_receipt_id: &receipt.channel_receipt_id,
+        challenge_uppercase_hex_256: &receipt.challenge_uppercase_hex_256,
+        completion_fingerprint: receipt.completion_fingerprint.clone(),
+        terminal_segment_fingerprint: receipt.terminal_segment_fingerprint.clone(),
+        terminal_observation_evidence_fingerprint: receipt
+            .terminal_observation_evidence_fingerprint
+            .clone(),
+        signing_key_id: &receipt.signing_key_id,
+    };
+    let unsigned_json = serde_json::to_vec(&unsigned).ok()?;
+    signed_json_preimage(b"MARTY-SD-JWT-COMPLETION-ANCHOR-V1\0", &unsigned_json)
+}
+
+fn valid_terminal_receipt_bytes(bytes: &[u8], verifying_key: &VerifyingKey) -> bool {
+    if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_EXTERNAL_ANCHOR_V1_BYTES) {
+        return false;
+    }
+    let Ok(receipt) = serde_json::from_slice::<TerminalObservationReceiptWire>(bytes) else {
+        return false;
+    };
+    canonical_pretty_bytes(&receipt).as_deref() == Some(bytes)
+        && receipt.schema == "marty.performance/sd-jwt-issuance-terminal-observation-receipt/v1"
+        && receipt.channel_id == "marty-sd-jwt-issuance-anchor-v1"
+        && receipt.log_id == "sd-jwt-issuance-qualification-v1"
+        && receipt.campaign_append_ordinal == 0
+        && receipt.signing_key_id == "marty-sd-jwt-issuance-anchor-ed25519-v1"
+        && valid_uppercase_hex(&receipt.channel_clock_session_id, 64)
+        && valid_uppercase_hex(&receipt.challenge_uppercase_hex_256, 64)
+        && valid_receipt_id(&receipt.channel_receipt_id)
+        && valid_utc_rfc3339_nanoseconds(&receipt.observed_at_utc_rfc3339_nanoseconds)
+        && valid_artifact_fingerprint(&receipt.terminal_segment_fingerprint)
+        && terminal_receipt_preimage(&receipt).is_some_and(|preimage| {
+            strict_signature_verifies(
+                verifying_key,
+                &preimage,
+                &receipt.signature_uppercase_hex_512,
+            )
+        })
+}
+
+#[cfg(test)]
+fn terminal_receipt_set_has_no_conflict(receipts: &[&[u8]], verifying_key: &VerifyingKey) -> bool {
+    let mut seen = BTreeMap::<(String, String, String, u64), Vec<u8>>::new();
+    receipts.iter().all(|bytes| {
+        if !valid_terminal_receipt_bytes(bytes, verifying_key) {
+            return false;
+        }
+        let Ok(receipt) = serde_json::from_slice::<TerminalObservationReceiptWire>(bytes) else {
+            return false;
+        };
+        let key = (
+            receipt.channel_id,
+            receipt.log_id,
+            receipt.campaign_id,
+            receipt.campaign_append_ordinal,
+        );
+        seen.insert(key, bytes.to_vec())
+            .is_none_or(|previous| previous.as_slice() == *bytes)
+    })
+}
+
+fn valid_completion_anchor_bytes(bytes: &[u8], verifying_key: &VerifyingKey) -> bool {
+    if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_EXTERNAL_ANCHOR_V1_BYTES) {
+        return false;
+    }
+    let Ok(receipt) = serde_json::from_slice::<CompletionAnchorWire>(bytes) else {
+        return false;
+    };
+    canonical_pretty_bytes(&receipt).as_deref() == Some(bytes)
+        && receipt.schema == "marty.performance/sd-jwt-issuance-completion-anchor/v1"
+        && receipt.channel_id == "marty-sd-jwt-issuance-anchor-v1"
+        && receipt.log_id == "sd-jwt-issuance-qualification-v1"
+        && receipt.campaign_append_ordinal == 1
+        && receipt.signing_key_id == "marty-sd-jwt-issuance-anchor-ed25519-v1"
+        && valid_uppercase_hex(&receipt.channel_clock_session_id, 64)
+        && valid_uppercase_hex(&receipt.challenge_uppercase_hex_256, 64)
+        && valid_receipt_id(&receipt.channel_receipt_id)
+        && valid_utc_rfc3339_nanoseconds(&receipt.published_at_utc_rfc3339_nanoseconds)
+        && valid_artifact_fingerprint(&receipt.completion_fingerprint)
+        && valid_artifact_fingerprint(&receipt.terminal_segment_fingerprint)
+        && valid_artifact_fingerprint(&receipt.terminal_observation_evidence_fingerprint)
+        && completion_anchor_preimage(&receipt).is_some_and(|preimage| {
+            strict_signature_verifies(
+                verifying_key,
+                &preimage,
+                &receipt.signature_uppercase_hex_512,
+            )
+        })
 }
 
 #[cfg(test)]
@@ -8137,5 +9308,41 @@ mod tests {
         )
         .expect("write compact manifest");
         assert!(load_manifest(&compact_path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod promoted_validation_primitives_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn promoted_primitives_are_bounded_and_fail_closed() {
+        assert!(valid_source_archive_path("Cargo.lock"));
+        assert!(!valid_source_archive_path("../Cargo.lock"));
+        assert!(valid_utc_rfc3339_nanoseconds(
+            "2024-02-29T23:59:59.123456789Z"
+        ));
+        assert!(!valid_utc_rfc3339_nanoseconds(
+            "0000-01-01T00:00:00.000000000Z"
+        ));
+        assert!(!valid_route_wire_bytes(
+            b"{}\n",
+            "benchmark",
+            "fixture",
+            "stage",
+            "serial",
+            1,
+            1,
+        ));
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        assert!(!valid_terminal_receipt_bytes(
+            b"{}\n",
+            &signing_key.verifying_key(),
+        ));
+        assert!(!valid_completion_anchor_bytes(
+            b"{}\n",
+            &signing_key.verifying_key(),
+        ));
     }
 }

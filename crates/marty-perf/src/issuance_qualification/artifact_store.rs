@@ -9,12 +9,16 @@ use anyhow::{Context, Result};
 use fs_at::{OpenOptions as AtOpenOptions, OpenOptionsWriteMode};
 use marty_perf_schema::ArtifactFingerprint;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use super::schedule::{ArtifactPath, ArtifactRole, ScheduledProcess};
 use super::{
-    ensure_file_unchanged, fingerprint, open_absolute_directory, verified_directory_identity,
-    verified_file_snapshot, FileIdentity,
+    ensure_file_unchanged, open_absolute_directory, verified_directory_identity,
+    verified_file_snapshot, FileIdentity, FileSnapshot, MAX_FIXED_BUILD_INPUT_BYTES,
 };
+
+const BUILD_INPUT_ARCHIVE_PATH: &str = "build/input-files.bia";
+const STREAM_BUFFER_BYTES: usize = 8 * 1024;
 
 const FIXED_DIRECTORIES: &[&str] = &[
     "inputs",
@@ -49,6 +53,16 @@ pub(super) struct CampaignArtifactStore {
     absolute_root: PathBuf,
     root: fs::File,
     identity: FileIdentity,
+}
+
+/// Store-bound proof that bytes were durably persisted at the fixed build-input archive role.
+///
+/// This capability attests only to persistence, identity, and fingerprinting. The later
+/// build-input slice remains responsible for validating archive framing and member semantics.
+pub(super) struct PersistedBuildInputArchiveBytes {
+    root_identity: FileIdentity,
+    snapshot: FileSnapshot,
+    fingerprint: ArtifactFingerprint,
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +101,25 @@ impl CampaignArtifactStore {
     ) -> Result<ArtifactFingerprint> {
         let path = ArtifactPath::canonical("first-quiet-window.json".into())?;
         self.write_canonical_pretty_create_new(&path, value, maximum)
+    }
+
+    pub(super) fn write_build_input_archive(
+        &self,
+        expected_length: u64,
+        emit: impl FnOnce(&mut dyn Write) -> Result<()>,
+    ) -> Result<PersistedBuildInputArchiveBytes> {
+        let path = ArtifactPath::canonical(BUILD_INPUT_ARCHIVE_PATH.into())?;
+        let (snapshot, fingerprint) = self.write_streamed_create_new(
+            &path,
+            expected_length,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+            emit,
+        )?;
+        Ok(PersistedBuildInputArchiveBytes {
+            root_identity: self.identity,
+            snapshot,
+            fingerprint,
+        })
     }
 
     pub(super) fn create_new(absolute_root: &Path) -> Result<Self> {
@@ -233,14 +266,28 @@ impl CampaignArtifactStore {
         expected_length: u64,
         maximum: u64,
     ) -> Result<ArtifactFingerprint> {
-        self.verify_root()?;
+        self.write_streamed_create_new(path, expected_length, maximum, |writer| {
+            copy_exact_source(&mut reader, writer, expected_length)
+        })
+        .map(|(_, fingerprint)| fingerprint)
+    }
+
+    fn write_streamed_create_new(
+        &self,
+        path: &ArtifactPath,
+        expected_length: u64,
+        maximum: u64,
+        emit: impl FnOnce(&mut dyn Write) -> Result<()>,
+    ) -> Result<(FileSnapshot, ArtifactFingerprint)> {
         anyhow::ensure!(
             expected_length <= maximum,
             "campaign artifact exceeds byte limit"
         );
+        self.verify_root()?;
         let mut components = validated_components(path.as_path())?;
         let name = components.pop().context("empty campaign artifact path")?;
         let parent = self.open_directory_components(&components)?;
+        let parent_identity = verified_directory_identity(&parent, "campaign artifact parent")?;
         let mut options = AtOpenOptions::default();
         options
             .read(true)
@@ -251,42 +298,200 @@ impl CampaignArtifactStore {
             .open_at(&parent, &name)
             .context("create campaign artifact")?;
         set_private_file_permissions(&file)?;
-        let mut retained = Vec::with_capacity(
-            usize::try_from(expected_length).context("artifact allocation overflow")?,
-        );
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let count = reader
-                .read(&mut buffer)
-                .context("read campaign artifact source")?;
-            if count == 0 {
-                break;
-            }
-            retained.extend_from_slice(&buffer[..count]);
-            anyhow::ensure!(
-                u64::try_from(retained.len()).context("artifact length overflow")? <= maximum,
-                "campaign artifact exceeds byte limit"
-            );
-            file.write_all(&buffer[..count])
-                .context("write campaign artifact")?;
-        }
-        anyhow::ensure!(
-            u64::try_from(retained.len()).context("artifact length overflow")? == expected_length,
-            "campaign artifact source was short"
-        );
+        let written_fingerprint = {
+            let mut writer = ExactFingerprintWriter::new(&mut file, expected_length, maximum)?;
+            emit(&mut writer).context("emit campaign artifact")?;
+            writer.finish()?
+        };
         file.flush().context("flush campaign artifact")?;
         file.sync_all().context("sync campaign artifact")?;
         sync_directory(&parent).context("sync campaign artifact parent")?;
         let snapshot = verified_file_snapshot(&file, maximum, "campaign artifact")?;
-        file.seek(SeekFrom::Start(0))
-            .context("rewind campaign artifact")?;
-        let mut actual = Vec::with_capacity(retained.len());
-        file.read_to_end(&mut actual)
-            .context("read retained campaign artifact")?;
-        anyhow::ensure!(actual == retained, "retained campaign artifact changed");
+        anyhow::ensure!(
+            snapshot.byte_length == expected_length,
+            "retained campaign artifact length changed"
+        );
+        self.verify_root()?;
+        let mut reopened =
+            self.reopen_bound_artifact(&components, &name, parent_identity, snapshot, maximum)?;
+        let retained_fingerprint = fingerprint_exact_source(&mut reopened, expected_length)?;
+        anyhow::ensure!(
+            retained_fingerprint == written_fingerprint,
+            "retained campaign artifact changed"
+        );
+        ensure_file_unchanged(&reopened, snapshot, "campaign artifact")?;
         ensure_file_unchanged(&file, snapshot, "campaign artifact")?;
-        fingerprint(&actual)
+        self.verify_root()?;
+        let final_reopen =
+            self.reopen_bound_artifact(&components, &name, parent_identity, snapshot, maximum)?;
+        self.verify_root()?;
+        ensure_file_unchanged(&final_reopen, snapshot, "campaign artifact")?;
+        Ok((snapshot, retained_fingerprint))
     }
+
+    fn reopen_bound_artifact(
+        &self,
+        components: &[OsString],
+        name: &OsString,
+        expected_parent_identity: FileIdentity,
+        expected_snapshot: FileSnapshot,
+        maximum: u64,
+    ) -> Result<fs::File> {
+        let parent = self.open_directory_components(components)?;
+        anyhow::ensure!(
+            verified_directory_identity(&parent, "campaign artifact parent")?
+                == expected_parent_identity,
+            "campaign artifact parent identity changed"
+        );
+        let mut options = AtOpenOptions::default();
+        options.read(true).follow(false);
+        let file = options
+            .open_at(&parent, name)
+            .context("reopen campaign artifact")?;
+        anyhow::ensure!(
+            verified_file_snapshot(&file, maximum, "campaign artifact")? == expected_snapshot,
+            "campaign artifact path binding changed"
+        );
+        Ok(file)
+    }
+}
+
+struct ExactFingerprintWriter<W> {
+    inner: W,
+    expected_length: u64,
+    written: u64,
+    hasher: Sha256,
+}
+
+impl<W> ExactFingerprintWriter<W> {
+    fn new(inner: W, expected_length: u64, maximum: u64) -> Result<Self> {
+        anyhow::ensure!(
+            expected_length <= maximum,
+            "campaign artifact exceeds byte limit"
+        );
+        Ok(Self {
+            inner,
+            expected_length,
+            written: 0,
+            hasher: Sha256::new(),
+        })
+    }
+
+    fn finish(self) -> Result<ArtifactFingerprint> {
+        anyhow::ensure!(
+            self.written == self.expected_length,
+            "campaign artifact source was short"
+        );
+        Ok(ArtifactFingerprint {
+            sha256: hex::encode_upper(self.hasher.finalize()),
+            byte_length: self.written,
+        })
+    }
+}
+
+impl<W: Write> Write for ExactFingerprintWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| std::io::Error::other("campaign artifact length overflow"))?;
+        let next = self
+            .written
+            .checked_add(length)
+            .ok_or_else(|| std::io::Error::other("campaign artifact length overflow"))?;
+        if next > self.expected_length {
+            return Err(std::io::Error::other("campaign artifact source was long"));
+        }
+        let written = self.inner.write(bytes)?;
+        if written > bytes.len() {
+            return Err(std::io::Error::other(
+                "campaign artifact writer violated the Write contract",
+            ));
+        }
+        self.hasher.update(&bytes[..written]);
+        self.written = self
+            .written
+            .checked_add(
+                u64::try_from(written)
+                    .map_err(|_| std::io::Error::other("campaign artifact length overflow"))?,
+            )
+            .ok_or_else(|| std::io::Error::other("campaign artifact length overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn copy_exact_source<R: Read + ?Sized, W: Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    expected_length: u64,
+) -> Result<()> {
+    let mut remaining = expected_length;
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    while remaining > 0 {
+        let take = usize::try_from(remaining.min(STREAM_BUFFER_BYTES as u64))
+            .context("campaign artifact buffer length overflow")?;
+        let read = loop {
+            match reader.read(&mut buffer[..take]) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => break result.context("read campaign artifact source")?,
+            }
+        };
+        anyhow::ensure!(read != 0, "campaign artifact source was short");
+        writer.write_all(&buffer[..read])?;
+        remaining = remaining
+            .checked_sub(u64::try_from(read).context("campaign artifact source length overflow")?)
+            .context("campaign artifact source length overflow")?;
+    }
+    let mut trailing = [0_u8; 1];
+    let trailing_length = loop {
+        match reader.read(&mut trailing) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => break result.context("read campaign artifact source")?,
+        }
+    };
+    anyhow::ensure!(trailing_length == 0, "campaign artifact source was long");
+    Ok(())
+}
+
+fn fingerprint_exact_source(
+    reader: &mut (impl Read + Seek),
+    expected_length: u64,
+) -> Result<ArtifactFingerprint> {
+    reader
+        .seek(SeekFrom::Start(0))
+        .context("rewind retained campaign artifact")?;
+    let mut remaining = expected_length;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    while remaining > 0 {
+        let take = usize::try_from(remaining.min(STREAM_BUFFER_BYTES as u64))
+            .context("retained campaign artifact buffer length overflow")?;
+        let read = loop {
+            match reader.read(&mut buffer[..take]) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => break result.context("read retained campaign artifact")?,
+            }
+        };
+        anyhow::ensure!(read != 0, "retained campaign artifact was short");
+        hasher.update(&buffer[..read]);
+        remaining = remaining
+            .checked_sub(u64::try_from(read).context("retained campaign artifact length overflow")?)
+            .context("retained campaign artifact length overflow")?;
+    }
+    let mut trailing = [0_u8; 1];
+    let trailing_length = loop {
+        match reader.read(&mut trailing) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => break result.context("read retained campaign artifact")?,
+        }
+    };
+    anyhow::ensure!(trailing_length == 0, "retained campaign artifact was long");
+    Ok(ArtifactFingerprint {
+        sha256: hex::encode_upper(hasher.finalize()),
+        byte_length: expected_length,
+    })
 }
 
 struct BoundedBytes {
@@ -410,7 +615,9 @@ mod tests {
     use serde::ser::Error as _;
 
     use super::*;
-    use crate::issuance_qualification::{plan_for_manifest, schedule::QualificationSchedule};
+    use crate::issuance_qualification::{
+        fingerprint, plan_for_manifest, schedule::QualificationSchedule,
+    };
 
     #[cfg(not(windows))]
     struct Broken;
@@ -419,6 +626,33 @@ mod tests {
     impl Read for Broken {
         fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
             Err(std::io::Error::other("synthetic read failure"))
+        }
+    }
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("synthetic write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct SyntheticReader {
+        remaining: usize,
+        maximum_requested: usize,
+    }
+
+    impl Read for SyntheticReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.maximum_requested = self.maximum_requested.max(buffer.len());
+            let read = self.remaining.min(buffer.len());
+            buffer[..read].fill(0x5a);
+            self.remaining -= read;
+            Ok(read)
         }
     }
 
@@ -456,6 +690,125 @@ mod tests {
         assert_eq!(line_feed.bytes, b"\"\"");
         assert!(line_feed.write_all(b"\n").is_err());
         assert_eq!(line_feed.bytes, b"\"\"");
+    }
+
+    #[test]
+    fn exact_fingerprinting_writer_is_chunk_independent_and_does_not_materialize_limit() {
+        let expected = b"streamed campaign artifact";
+        let mut output = Vec::new();
+        let actual_fingerprint = {
+            let mut writer = ExactFingerprintWriter::new(
+                &mut output,
+                u64::try_from(expected.len()).unwrap(),
+                u64::try_from(expected.len()).unwrap(),
+            )
+            .unwrap();
+            writer.write_all(&expected[..3]).unwrap();
+            writer.write_all(&expected[3..11]).unwrap();
+            writer.write_all(&expected[11..]).unwrap();
+            writer.finish().unwrap()
+        };
+        assert_eq!(output, expected);
+        assert_eq!(actual_fingerprint, fingerprint(expected).unwrap());
+
+        let exact_limit = ExactFingerprintWriter::new(
+            std::io::sink(),
+            MAX_FIXED_BUILD_INPUT_BYTES,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+        );
+        assert!(exact_limit.is_ok());
+        assert!(ExactFingerprintWriter::new(
+            std::io::sink(),
+            MAX_FIXED_BUILD_INPUT_BYTES + 1,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn exact_fingerprinting_writer_rejects_short_overlong_and_broken_outputs() {
+        let mut short_output = Vec::new();
+        let mut short = ExactFingerprintWriter::new(&mut short_output, 3, 3).unwrap();
+        short.write_all(b"12").unwrap();
+        assert_eq!(
+            short.finish().unwrap_err().to_string(),
+            "campaign artifact source was short"
+        );
+        assert_eq!(short_output, b"12");
+
+        let mut overlong_output = Vec::new();
+        let mut overlong = ExactFingerprintWriter::new(&mut overlong_output, 2, 2).unwrap();
+        overlong.write_all(b"12").unwrap();
+        assert_eq!(
+            overlong.write_all(b"3").unwrap_err().to_string(),
+            "campaign artifact source was long"
+        );
+        assert_eq!(overlong_output, b"12");
+
+        let mut broken = ExactFingerprintWriter::new(BrokenWriter, 1, 1).unwrap();
+        assert_eq!(
+            broken.write_all(b"x").unwrap_err().to_string(),
+            "synthetic write failure"
+        );
+    }
+
+    #[test]
+    fn fixed_buffer_copy_requires_exact_source_eof() {
+        let mut exact_output = Vec::new();
+        copy_exact_source(&mut std::io::Cursor::new(b"exact"), &mut exact_output, 5).unwrap();
+        assert_eq!(exact_output, b"exact");
+
+        let mut short_output = Vec::new();
+        assert_eq!(
+            copy_exact_source(&mut std::io::Cursor::new(b"short"), &mut short_output, 6,)
+                .unwrap_err()
+                .to_string(),
+            "campaign artifact source was short"
+        );
+        assert_eq!(short_output, b"short");
+
+        let mut long_output = Vec::new();
+        assert_eq!(
+            copy_exact_source(&mut std::io::Cursor::new(b"long"), &mut long_output, 3,)
+                .unwrap_err()
+                .to_string(),
+            "campaign artifact source was long"
+        );
+        assert_eq!(long_output, b"lon");
+
+        let length = STREAM_BUFFER_BYTES * 3 + 17;
+        let mut synthetic = SyntheticReader {
+            remaining: length,
+            maximum_requested: 0,
+        };
+        copy_exact_source(
+            &mut synthetic,
+            &mut std::io::sink(),
+            u64::try_from(length).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(synthetic.remaining, 0);
+        assert_eq!(synthetic.maximum_requested, STREAM_BUFFER_BYTES);
+
+        let mut retained = std::io::Cursor::new(b"exact");
+        assert_eq!(
+            fingerprint_exact_source(&mut retained, 5).unwrap(),
+            fingerprint(b"exact").unwrap()
+        );
+        let mut retained_short = std::io::Cursor::new(b"short");
+        assert_eq!(
+            fingerprint_exact_source(&mut retained_short, 6)
+                .unwrap_err()
+                .to_string(),
+            "retained campaign artifact was short"
+        );
+        let mut retained_long = std::io::Cursor::new(b"long");
+        assert_eq!(
+            fingerprint_exact_source(&mut retained_long, 3)
+                .unwrap_err()
+                .to_string(),
+            "retained campaign artifact was long"
+        );
     }
 
     #[cfg(not(windows))]
@@ -624,6 +977,173 @@ mod tests {
             .write_canonical_pretty_create_new(&over_limit, &"x".repeat(1024), 16)
             .is_err());
         assert!(!root.join(over_limit.as_path()).exists());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn build_input_archive_stream_is_fixed_role_capped_and_create_only() {
+        let (temporary, store) = store();
+        store.initialize_fixed_layout().unwrap();
+        let root = temporary.path().join("campaign");
+        let bytes = b"synthetic streamed build input bytes";
+        let persisted = store
+            .write_build_input_archive(u64::try_from(bytes.len()).unwrap(), |writer| {
+                writer.write_all(&bytes[..9])?;
+                writer.write_all(&bytes[9..])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(persisted.fingerprint, fingerprint(bytes).unwrap());
+        assert_eq!(persisted.root_identity, store.identity);
+        assert_eq!(persisted.snapshot.byte_length, bytes.len() as u64);
+        assert_eq!(
+            fs::read(root.join(BUILD_INPUT_ARCHIVE_PATH)).unwrap(),
+            bytes
+        );
+        assert!(store
+            .write_build_input_archive(u64::try_from(bytes.len()).unwrap(), |writer| {
+                writer.write_all(bytes)?;
+                Ok(())
+            })
+            .is_err());
+
+        let (temporary, second_store) = self::store();
+        second_store.initialize_fixed_layout().unwrap();
+        let invoked = std::cell::Cell::new(false);
+        let Err(error) =
+            second_store.write_build_input_archive(MAX_FIXED_BUILD_INPUT_BYTES + 1, |_writer| {
+                invoked.set(true);
+                Ok(())
+            })
+        else {
+            panic!("an oversized archive must not issue a persistence capability");
+        };
+        assert_eq!(error.to_string(), "campaign artifact exceeds byte limit");
+        assert!(!invoked.get());
+        assert!(!temporary
+            .path()
+            .join("campaign")
+            .join(BUILD_INPUT_ARCHIVE_PATH)
+            .exists());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn failed_build_input_archive_streams_poison_the_create_only_campaign() {
+        for (expected, emit, retained) in [
+            (3, b"12".as_slice(), b"12".as_slice()),
+            (2, b"123".as_slice(), b"12".as_slice()),
+        ] {
+            let (temporary, store) = store();
+            store.initialize_fixed_layout().unwrap();
+            assert!(store
+                .write_build_input_archive(expected, |writer| {
+                    copy_exact_source(&mut std::io::Cursor::new(emit), writer, expected)
+                })
+                .is_err());
+            let path = temporary
+                .path()
+                .join("campaign")
+                .join(BUILD_INPUT_ARCHIVE_PATH);
+            assert_eq!(fs::read(path).unwrap(), retained);
+            assert!(store
+                .write_build_input_archive(expected, |_writer| Ok(()))
+                .is_err());
+        }
+
+        let (temporary, store) = store();
+        store.initialize_fixed_layout().unwrap();
+        let Err(error) = store.write_build_input_archive(1, |writer| {
+            writer.write_all(b"x")?;
+            Err(anyhow::anyhow!("synthetic emitter failure"))
+        }) else {
+            panic!("a failed emitter must not issue a persistence capability");
+        };
+        assert_eq!(error.to_string(), "emit campaign artifact");
+        assert_eq!(
+            fs::read(
+                temporary
+                    .path()
+                    .join("campaign")
+                    .join(BUILD_INPUT_ARCHIVE_PATH)
+            )
+            .unwrap(),
+            b"x"
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn retained_archive_mutation_and_hardlink_insertion_issue_no_capability() {
+        let (temporary, store) = store();
+        store.initialize_fixed_layout().unwrap();
+        let path = temporary
+            .path()
+            .join("campaign")
+            .join(BUILD_INPUT_ARCHIVE_PATH);
+        assert!(store
+            .write_build_input_archive(4, |writer| {
+                writer.write_all(b"safe")?;
+                let mut replacement = fs::OpenOptions::new().write(true).open(&path)?;
+                replacement.write_all(b"evil")?;
+                replacement.sync_all()?;
+                Ok(())
+            })
+            .is_err());
+
+        let (temporary, second_store) = self::store();
+        second_store.initialize_fixed_layout().unwrap();
+        let root = temporary.path().join("campaign");
+        let path = root.join(BUILD_INPUT_ARCHIVE_PATH);
+        assert!(second_store
+            .write_build_input_archive(4, |writer| {
+                writer.write_all(b"safe")?;
+                fs::hard_link(&path, root.join("build/linked-input-files.bia"))?;
+                Ok(())
+            })
+            .is_err());
+
+        let (temporary, third_store) = self::store();
+        third_store.initialize_fixed_layout().unwrap();
+        let root = temporary.path().join("campaign");
+        let path = root.join(BUILD_INPUT_ARCHIVE_PATH);
+        assert!(third_store
+            .write_build_input_archive(4, |writer| {
+                writer.write_all(b"safe")?;
+                fs::rename(&path, root.join("build/displaced-input-files.bia"))?;
+                fs::write(&path, b"evil")?;
+                Ok(())
+            })
+            .is_err());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn archive_parent_and_campaign_root_replacement_issue_no_capability() {
+        let (temporary, second_store) = self::store();
+        second_store.initialize_fixed_layout().unwrap();
+        let root = temporary.path().join("campaign");
+        assert!(second_store
+            .write_build_input_archive(4, |writer| {
+                writer.write_all(b"safe")?;
+                fs::rename(root.join("build"), root.join("moved-build"))?;
+                fs::create_dir(root.join("build"))?;
+                Ok(())
+            })
+            .is_err());
+
+        let (temporary, store) = store();
+        store.initialize_fixed_layout().unwrap();
+        let root = temporary.path().join("campaign");
+        assert!(store
+            .write_build_input_archive(4, |writer| {
+                writer.write_all(b"safe")?;
+                fs::rename(&root, temporary.path().join("moved-campaign"))?;
+                fs::create_dir(&root)?;
+                fs::create_dir(root.join("build"))?;
+                Ok(())
+            })
+            .is_err());
     }
 
     #[test]

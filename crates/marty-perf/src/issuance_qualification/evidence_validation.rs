@@ -1,17 +1,19 @@
 //! Fail-closed validation of complete retained issuance measurement evidence.
 
 use anyhow::{Context, Result};
-use marty_perf_schema::{ArtifactFingerprint, SdJwtIssuanceQualificationManifest};
+use marty_perf_schema::{
+    ArtifactFingerprint, SdJwtIssuanceQualificationManifest, SdJwtIssuanceQualificationPlan,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::{
-    fingerprint, parse_canonical_pretty, read_campaign_input, route_expectation,
-    statistics::criterion_median, valid_route_wire_bytes, AnalysisReadBudget, CampaignDirectory,
-    CompletionWire, HardwareProfileWire, PAIRED_CELL_COUNT, PROCESSES_PER_SUPERBLOCK,
+    fingerprint, parse_canonical_pretty, read_campaign_input,
+    schedule::{ArtifactRole, QualificationSchedule, ScheduledProcess},
+    statistics::criterion_median,
+    valid_route_wire_bytes, AnalysisReadBudget, CampaignDirectory, CompletionWire,
+    HardwareProfileWire,
 };
-
-const COORDINATE_COUNT: usize = 20 * PAIRED_CELL_COUNT * PROCESSES_PER_SUPERBLOCK as usize;
 const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024;
 const MAX_CRITERION_SUBTOTAL_BYTES: u64 = 512 * 1024 * 1024;
@@ -65,20 +67,6 @@ pub(super) struct ValidatedMedianMatrix {
     pub medians_nanoseconds: Vec<f64>,
 }
 
-fn coordinate(position: usize) -> Option<(u32, u32, u32)> {
-    (position < COORDINATE_COUNT)
-        .then(|| {
-            let position = u32::try_from(position).ok()?;
-            let per_round = u32::try_from(PAIRED_CELL_COUNT).ok()? * PROCESSES_PER_SUPERBLOCK;
-            Some((
-                position / per_round,
-                (position % per_round) / PROCESSES_PER_SUPERBLOCK,
-                position % PROCESSES_PER_SUPERBLOCK,
-            ))
-        })
-        .flatten()
-}
-
 fn charge_subtotal(current: &mut u64, bytes: usize, maximum: u64) -> Result<()> {
     *current = current
         .checked_add(u64::try_from(bytes)?)
@@ -115,46 +103,38 @@ fn read_artifact_with_remaining(
     )
 }
 
-fn path(kind: ArtifactKind, round: u32, cell: u32, expansion: u32, id: &str) -> Option<String> {
-    match kind {
-        ArtifactKind::Route => Some(format!("routes/r{round:02}_c{cell:02}_e{expansion}.ndjson")),
-        ArtifactKind::Criterion => Some(format!(
-            "criterion/r{round:02}_c{cell:02}_e{expansion}/sd_jwt_issuance/{}/new/estimates.json",
-            id.strip_prefix("sd_jwt_issuance/")?
-        )),
-    }
-}
-
 fn validate_index_entry(
     index: &ArtifactIndex,
     kind: ArtifactKind,
     campaign_id: &str,
     position: usize,
-    benchmark_id: &str,
+    schedule_len: usize,
+    process: &ScheduledProcess<'_>,
     bound: &ArtifactFingerprint,
 ) -> Result<()> {
     anyhow::ensure!(
         index.schema == kind.schema()
             && index.campaign_id == campaign_id
             && index.artifact_kind == kind.literal()
-            && usize::try_from(index.entry_count) == Ok(COORDINATE_COUNT)
-            && index.entries.len() == COORDINATE_COUNT,
+            && usize::try_from(index.entry_count) == Ok(schedule_len)
+            && index.entries.len() == schedule_len,
         "evidence rejected: index envelope"
     );
-    let (round, cell, expansion) = coordinate(position).context("evidence rejected: coordinate")?;
     let entry = index
         .entries
         .get(position)
         .context("evidence rejected: index coverage")?;
     anyhow::ensure!(
-        entry.global_round_ordinal == round
-            && entry.cell_ordinal == cell
-            && entry.expansion_position == expansion
-            && entry.timing_process_id == format!("r{round:02}-c{cell:02}-e{expansion}")
-            && entry.full_benchmark_id == benchmark_id
+        entry.global_round_ordinal == process.coordinate.global_round
+            && entry.cell_ordinal == process.coordinate.cell
+            && entry.expansion_position == process.coordinate.expansion
+            && entry.timing_process_id == process.timing_process_id
+            && entry.full_benchmark_id == process.full_benchmark_id
             && entry.relative_path
-                == path(kind, round, cell, expansion, benchmark_id)
-                    .context("evidence rejected: path")?
+                == process.relative_path(match kind {
+                    ArtifactKind::Route => ArtifactRole::Route,
+                    ArtifactKind::Criterion => ArtifactRole::Criterion,
+                })?
             && &entry.fingerprint == bound,
         "evidence rejected: index binding"
     );
@@ -169,10 +149,13 @@ fn validate_index_entry(
 pub(super) fn validate_complete_campaign(
     campaign: &CampaignDirectory,
     manifest: &SdJwtIssuanceQualificationManifest,
+    plan: &SdJwtIssuanceQualificationPlan,
     completion: &CompletionWire,
     hardware: &HardwareProfileWire,
     read_budget: &mut AnalysisReadBudget,
 ) -> Result<ValidatedMedianMatrix> {
+    let schedule =
+        QualificationSchedule::new(plan, manifest).context("evidence rejected: schedule")?;
     let criterion_index_bytes = read_campaign_input(
         read_budget,
         campaign,
@@ -196,17 +179,13 @@ pub(super) fn validate_complete_campaign(
         parse_canonical_pretty(&criterion_index_bytes, "criterion index")?;
     let route: ArtifactIndex = parse_canonical_pretty(&route_index_bytes, "route index")?;
     anyhow::ensure!(
-        completion.process_completions.len() == COORDINATE_COUNT,
+        completion.process_completions.len() == schedule.iter().len(),
         "evidence rejected: completion coverage"
     );
     let mut criterion_total = 0_u64;
     let mut route_total = 0_u64;
-    let mut medians_nanoseconds = Vec::with_capacity(COORDINATE_COUNT);
-    for position in 0..COORDINATE_COUNT {
-        let (round, cell, expansion) =
-            coordinate(position).context("evidence rejected: coordinate")?;
-        let expected = route_expectation(manifest, round, cell, expansion)
-            .context("evidence rejected: schedule")?;
+    let mut medians_nanoseconds = Vec::with_capacity(schedule.iter().len());
+    for (position, expected) in schedule.iter().enumerate() {
         let completion_entry = &completion.process_completions[position];
         let criterion_entry = criterion
             .entries
@@ -216,13 +195,12 @@ pub(super) fn validate_complete_campaign(
             .entries
             .get(position)
             .context("evidence rejected: route coverage")?;
-        let timing_id = format!("r{round:02}-c{cell:02}-e{expansion}");
         anyhow::ensure!(
-            completion_entry.global_round_ordinal == round
-                && completion_entry.cell_ordinal == cell
-                && completion_entry.expansion_position == expansion
-                && completion_entry.timing_process_id == timing_id
-                && completion_entry.full_benchmark_id == expected.benchmark_id,
+            completion_entry.global_round_ordinal == expected.coordinate.global_round
+                && completion_entry.cell_ordinal == expected.coordinate.cell
+                && completion_entry.expansion_position == expected.coordinate.expansion
+                && completion_entry.timing_process_id == expected.timing_process_id
+                && completion_entry.full_benchmark_id == expected.full_benchmark_id,
             "evidence rejected: completion coordinate"
         );
         for (kind, index, bound) in [
@@ -242,7 +220,8 @@ pub(super) fn validate_complete_campaign(
                 kind,
                 &completion.campaign_id,
                 position,
-                expected.benchmark_id,
+                schedule.iter().len(),
+                expected,
                 bound,
             )?;
         }
@@ -277,7 +256,7 @@ pub(super) fn validate_complete_campaign(
         anyhow::ensure!(
             valid_route_wire_bytes(
                 &route_bytes,
-                expected.benchmark_id,
+                expected.full_benchmark_id,
                 expected.fixture_id,
                 expected.stage,
                 expected.requested,
@@ -298,11 +277,16 @@ mod tests {
     use std::fs;
 
     use super::*;
-    #[test]
-    fn coordinate_order_is_exact_and_bounded() {
-        assert_eq!(coordinate(0), Some((0, 0, 0)));
-        assert_eq!(coordinate(COORDINATE_COUNT - 1), Some((19, 65, 7)));
-        assert_eq!(coordinate(COORDINATE_COUNT), None);
+
+    fn schedule_inputs() -> (
+        SdJwtIssuanceQualificationManifest,
+        SdJwtIssuanceQualificationPlan,
+    ) {
+        let bytes =
+            include_bytes!("../../tests/fixtures/sd-jwt-issuance-qualification-manifest-v1.json");
+        let manifest = serde_json::from_slice(bytes).unwrap();
+        let plan = super::super::plan_for_manifest(&manifest, bytes).unwrap();
+        (manifest, plan)
     }
 
     #[test]
@@ -371,43 +355,36 @@ mod tests {
     #[test]
     fn production_index_kernel_requires_exact_10_560_order_and_completion_binding() {
         let campaign_id = "018f4f9a-3f5b-4ae8-8a37-11c9fc12d001";
-        let benchmark_id = "sd_jwt_issuance/synthetic";
         let bound = fingerprint(b"owned synthetic artifact").unwrap();
-        let entries = (0..COORDINATE_COUNT)
-            .map(|position| {
-                let (round, cell, expansion) = coordinate(position).unwrap();
-                ArtifactIndexEntry {
-                    global_round_ordinal: round,
-                    cell_ordinal: cell,
-                    expansion_position: expansion,
-                    timing_process_id: format!("r{round:02}-c{cell:02}-e{expansion}"),
-                    full_benchmark_id: benchmark_id.to_owned(),
-                    relative_path: path(
-                        ArtifactKind::Criterion,
-                        round,
-                        cell,
-                        expansion,
-                        benchmark_id,
-                    )
-                    .unwrap(),
-                    fingerprint: bound.clone(),
-                }
+        let (manifest, plan) = schedule_inputs();
+        let schedule = QualificationSchedule::new(&plan, &manifest).unwrap();
+        let entries = schedule
+            .iter()
+            .map(|process| ArtifactIndexEntry {
+                global_round_ordinal: process.coordinate.global_round,
+                cell_ordinal: process.coordinate.cell,
+                expansion_position: process.coordinate.expansion,
+                timing_process_id: process.timing_process_id.clone(),
+                full_benchmark_id: process.full_benchmark_id.to_owned(),
+                relative_path: process.relative_path(ArtifactRole::Criterion).unwrap(),
+                fingerprint: bound.clone(),
             })
             .collect::<Vec<_>>();
         let valid = ArtifactIndex {
             schema: ArtifactKind::Criterion.schema().to_owned(),
             campaign_id: campaign_id.to_owned(),
             artifact_kind: ArtifactKind::Criterion.literal().to_owned(),
-            entry_count: u32::try_from(COORDINATE_COUNT).unwrap(),
+            entry_count: u32::try_from(schedule.iter().len()).unwrap(),
             entries,
         };
-        for position in 0..COORDINATE_COUNT {
+        for (position, process) in schedule.iter().enumerate() {
             validate_index_entry(
                 &valid,
                 ArtifactKind::Criterion,
                 campaign_id,
                 position,
-                benchmark_id,
+                schedule.iter().len(),
+                process,
                 &bound,
             )
             .unwrap();
@@ -419,7 +396,8 @@ mod tests {
             ArtifactKind::Criterion,
             campaign_id,
             0,
-            benchmark_id,
+            schedule.iter().len(),
+            schedule.iter().next().unwrap(),
             &bound
         )
         .is_err());
@@ -430,7 +408,8 @@ mod tests {
             ArtifactKind::Criterion,
             campaign_id,
             1_642,
-            benchmark_id,
+            schedule.iter().len(),
+            schedule.iter().nth(1_642).unwrap(),
             &bound
         )
         .is_err());
@@ -440,7 +419,8 @@ mod tests {
             ArtifactKind::Criterion,
             campaign_id,
             0,
-            benchmark_id,
+            schedule.iter().len(),
+            schedule.iter().next().unwrap(),
             &wrong_bound
         )
         .is_err());

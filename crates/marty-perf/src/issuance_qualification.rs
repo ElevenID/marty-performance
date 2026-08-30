@@ -31,7 +31,12 @@ use sha2::{Digest, Sha256};
 use uuid::{Uuid, Variant, Version};
 
 mod evidence_validation;
+mod schedule;
 mod statistics;
+
+use schedule::{
+    ABBA_EXPANSION, BAAB_EXPANSION, PAIRED_CELL_COUNT, PROCESSES_PER_SUPERBLOCK, SUPERBLOCK_ORDERS,
+};
 
 const MANIFEST_SCHEMA: &str = "sd_jwt_issuance_qualification_manifest_v1";
 const PLAN_SCHEMA: &str = "marty.performance/sd-jwt-issuance-plan/v3";
@@ -41,10 +46,8 @@ const WORK_ESTIMATOR_VERSION: &str = "issuance_work_bytes_v1";
 const STATIC_PARTITION_RULE_VERSION: &str = "contiguous_ceil_chunks_v1";
 const FIXTURE_CASE_COUNT: usize = 33;
 const BENCHMARK_ID_COUNT: usize = 132;
-const PAIRED_CELL_COUNT: usize = 66;
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const QUIET_WINDOW_SECONDS: u64 = 45 * 60;
-const PROCESSES_PER_SUPERBLOCK: u32 = 8;
 const MAX_EXTERNAL_ANCHOR_V1_BYTES: u64 = 16 * 1024;
 const MAX_SOURCE_ARCHIVE_V1_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_ARCHIVE_MANIFEST_V1_BYTES: u64 = 4 * 1024 * 1024;
@@ -62,35 +65,6 @@ const FIXED_BUILD_ROOT_WINDOWS: &str = "M:/marty-cdla-build-v1";
 const FIXED_BUILD_ROOT_NON_WINDOWS: &str = "/marty-cdla-build-v1";
 const FIXED_BUILD_INPUT_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-BUILD-INPUT-ARCHIVE-V1\n";
 const SOURCE_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-SOURCE-ARCHIVE-V1\n";
-
-const SUPERBLOCK_ORDERS: [&str; 20] = [
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-    "BAAB_FIRST",
-    "ABBA_FIRST",
-];
-const ABBA_EXPANSION: [&str; 8] = [
-    "serial", "adaptive", "adaptive", "serial", "adaptive", "serial", "serial", "adaptive",
-];
-const BAAB_EXPANSION: [&str; 8] = [
-    "adaptive", "serial", "serial", "adaptive", "serial", "adaptive", "adaptive", "serial",
-];
 
 pub(crate) fn write_plan(manifest_path: &Path, output_path: &Path) -> Result<()> {
     anyhow::ensure!(
@@ -1669,10 +1643,10 @@ fn run_validity_limits() -> SdJwtIssuanceRunValidityLimits {
         maximum_timing_process_seconds: 5 * 60,
         maximum_anchor_publication_delay_seconds: 5 * 60,
         maximum_test_window_attestations: 16,
-        exact_global_rounds: 20,
-        exact_cells_per_round: 66,
-        exact_expansion_positions_per_cell: 8,
-        exact_timing_processes: 10_560,
+        exact_global_rounds: schedule::ROUND_COUNT,
+        exact_cells_per_round: schedule::CELL_COUNT,
+        exact_expansion_positions_per_cell: schedule::EXPANSION_COUNT,
+        exact_timing_processes: schedule::TOTAL_PROCESS_COUNT,
         validation_rule: "before_UTF8_or_JSON_analyzer_opens_fixed_inputs/qualification-plan.json_without_following_links_reads_at_most_compiled_MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES_1048576_plus_one_rejects_larger_then_parses_exact_deny-unknown_V3_and_requires_canonical_pretty_JSON_plus_LF_before_using_any_plan-declared_limit_manifest_uses_its_independent_compiled_4194304_cap_stream_other_files_without_unbounded_buffering_check_each_declared_and_actual_size_before_allocation_or_hashing_the_build_input_archive_is_opened_without_following_links_outer-hashed_under_the_compiled_2147483648_byte_cap_then_rewound_on_the_same_immutable_handle_and_stream-framed_against_the_bound_inventory_without_member-sized_allocation_maximum_auxiliary_preimage_bytes_is_only_the_fallback_for_controller_monitor_anchor-channel_host-hardware-threshold-test-window-process-set-invocation-barrier-and-inventory_JSON_without_another_dedicated_cap_and_never_overrides_the_dedicated_segment_completion_anchor_route_Criterion_source-archive_or_build-input-archive_cap_each_dedicated_cap_has_precedence_route_Criterion_build-input-archive_segment_and_all_other_subtotals_are_part_of_total_evidence_bytes_and_reject_when_any_individual_subtotal_or_aggregate_limit_would_be_exceeded".to_owned(),
     }
 }
@@ -5192,65 +5166,6 @@ fn valid_build_input_archive_bytes(
         && validate_build_input_archive_stream(&mut std::io::Cursor::new(bytes), inventory).is_ok()
 }
 
-fn validate_route_relative_path(path: &Path) -> Option<(u32, u32, u32)> {
-    let value = path.to_str()?;
-    let coordinate = value.strip_prefix("routes/r")?.strip_suffix(".ndjson")?;
-    let (round, rest) = coordinate.split_once("_c")?;
-    let (cell, expansion) = rest.split_once("_e")?;
-    if round.len() != 2
-        || cell.len() != 2
-        || expansion.len() != 1
-        || !round
-            .bytes()
-            .chain(cell.bytes())
-            .chain(expansion.bytes())
-            .all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let round = round.parse::<u32>().ok()?;
-    let cell = cell.parse::<u32>().ok()?;
-    let expansion = expansion.parse::<u32>().ok()?;
-    (round < 20
-        && cell < 66
-        && expansion < 8
-        && value == format!("routes/r{round:02}_c{cell:02}_e{expansion}.ndjson"))
-    .then_some((round, cell, expansion))
-}
-
-struct RouteExpectation<'a> {
-    benchmark_id: &'a str,
-    fixture_id: &'a str,
-    stage: &'a str,
-    requested: &'static str,
-}
-
-fn route_expectation(
-    manifest: &SdJwtIssuanceQualificationManifest,
-    round: u32,
-    cell: u32,
-    expansion: u32,
-) -> Option<RouteExpectation<'_>> {
-    let order = *SUPERBLOCK_ORDERS.get(usize::try_from(round).ok()?)?;
-    let route = match order {
-        "ABBA_FIRST" => *ABBA_EXPANSION.get(usize::try_from(expansion).ok()?)?,
-        "BAAB_FIRST" => *BAAB_EXPANSION.get(usize::try_from(expansion).ok()?)?,
-        _ => return None,
-    };
-    let cell = manifest.paired_cells.get(usize::try_from(cell).ok()?)?;
-    let (benchmark_id, requested) = match route {
-        "serial" => (cell.serial_id.as_str(), "serial_oracle"),
-        "adaptive" => (cell.adaptive_id.as_str(), "adaptive_candidate"),
-        _ => return None,
-    };
-    Some(RouteExpectation {
-        benchmark_id,
-        fixture_id: &cell.fixture_id,
-        stage: &cell.stage,
-        requested,
-    })
-}
-
 fn monotonic_duration_within_seconds(first: u64, last: u64, maximum_seconds: u32) -> bool {
     last.checked_sub(first).is_some_and(|duration| {
         u64::from(maximum_seconds)
@@ -5262,7 +5177,7 @@ fn monotonic_duration_within_seconds(first: u64, last: u64, maximum_seconds: u32
 fn validate_completion(
     completion: &CompletionWire,
     campaign_id: &str,
-    qualification_manifest: &SdJwtIssuanceQualificationManifest,
+    schedule: &schedule::QualificationSchedule<'_>,
     plan: &ArtifactFingerprint,
     manifest: &ArtifactFingerprint,
     anchor_configuration: &ArtifactFingerprint,
@@ -5309,31 +5224,22 @@ fn validate_completion(
             maximum_campaign_seconds,
         )
         && completion.last_monotonic_nanoseconds <= completion.created_at_monotonic_nanoseconds
-        && completion.process_intent_count == 10_560
-        && completion.process_start_count == 10_560
-        && completion.process_finish_count == 10_560
-        && completion.process_completions.len() == 10_560
+        && completion.process_intent_count == schedule::TOTAL_PROCESS_COUNT
+        && completion.process_start_count == schedule::TOTAL_PROCESS_COUNT
+        && completion.process_finish_count == schedule::TOTAL_PROCESS_COUNT
+        && completion.process_completions.len() == schedule.iter().len()
         && completion.invalidating_event_count == 0
         && completion.validity_status == "valid"
         && completion
             .process_completions
             .iter()
-            .enumerate()
-            .all(|(position, entry)| {
-                let Ok(position) = u32::try_from(position) else {
-                    return false;
-                };
-                let round = position / 528;
-                let cell = (position % 528) / 8;
-                let expansion = position % 8;
-                let expected_benchmark_id =
-                    route_expectation(qualification_manifest, round, cell, expansion)
-                        .map(|expectation| expectation.benchmark_id);
-                entry.global_round_ordinal == round
-                    && entry.cell_ordinal == cell
-                    && entry.expansion_position == expansion
-                    && entry.timing_process_id == format!("r{round:02}-c{cell:02}-e{expansion}")
-                    && Some(entry.full_benchmark_id.as_str()) == expected_benchmark_id
+            .zip(schedule.iter())
+            .all(|(entry, expected)| {
+                entry.global_round_ordinal == expected.coordinate.global_round
+                    && entry.cell_ordinal == expected.coordinate.cell
+                    && entry.expansion_position == expected.coordinate.expansion
+                    && entry.timing_process_id == expected.timing_process_id
+                    && entry.full_benchmark_id == expected.full_benchmark_id
                     && [
                         &entry.process_intent_record_fingerprint,
                         &entry.process_start_record_fingerprint,
@@ -5525,7 +5431,7 @@ fn write_analysis_report(
     reason = "the ordered fail-closed verification pipeline keeps every cross-artifact binding visible"
 )]
 pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
-    let (round, cell, expansion) = validate_route_relative_path(request.route_artifact)
+    let coordinate = schedule::QualificationSchedule::parse_route_path(request.route_artifact)
         .context("analysis rejected: route artifact role")?;
     let campaign = CampaignDirectory::open(request.campaign_root)?;
     let mut read_budget = AnalysisReadBudget::default();
@@ -5553,6 +5459,8 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
     let expected_plan =
         plan_for_manifest(&manifest, &manifest_bytes).context("analysis rejected: plan binding")?;
     anyhow::ensure!(plan == expected_plan, "analysis rejected: plan binding");
+    let schedule = schedule::QualificationSchedule::new(&plan, &manifest)
+        .context("analysis rejected: schedule")?;
     let plan_fingerprint = fingerprint(&plan_bytes)?;
 
     let hardware_bytes = read_campaign_input(
@@ -5570,7 +5478,8 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
     );
     let hardware_fingerprint = fingerprint(&hardware_bytes)?;
 
-    let route_expectation = route_expectation(&manifest, round, cell, expansion)
+    let route_expectation = schedule
+        .get(coordinate)
         .context("analysis rejected: route identity")?;
     let route_bytes = read_campaign_input(
         &mut read_budget,
@@ -5582,7 +5491,7 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
     anyhow::ensure!(
         valid_route_wire_bytes(
             &route_bytes,
-            route_expectation.benchmark_id,
+            route_expectation.full_benchmark_id,
             route_expectation.fixture_id,
             route_expectation.stage,
             route_expectation.requested,
@@ -5855,7 +5764,7 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
         validate_completion(
             &completion,
             &build_receipt.campaign_id,
-            &manifest,
+            &schedule,
             &plan_fingerprint,
             &manifest_fingerprint,
             &anchor_configuration_fingerprint,
@@ -5925,14 +5834,10 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
     let terminal_footer: SegmentFooterWire =
         parse_canonical_compact_line(&terminal_segment.last_line, "terminal footer")?;
     let terminal_segment_fingerprint = terminal_segment.fingerprint.clone();
-    let route_position = usize::try_from(
-        round
-            .checked_mul(528)
-            .and_then(|value| value.checked_add(cell * 8))
-            .and_then(|value| value.checked_add(expansion))
-            .context("analysis rejected: route coordinate")?,
-    )
-    .context("analysis rejected: route coordinate")?;
+    let route_position = schedule
+        .iter()
+        .position(|process| process.coordinate == coordinate)
+        .context("analysis rejected: route coordinate")?;
     anyhow::ensure!(
         completion.terminal_segment_fingerprint == terminal_segment_fingerprint
             && validate_terminal_footer(
@@ -5949,7 +5854,7 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
             && completion.terminal_observation_evidence_fingerprint
                 == terminal_evidence_fingerprint
             && completion.process_completions[route_position].full_benchmark_id
-                == route_expectation.benchmark_id
+                == route_expectation.full_benchmark_id
             && completion.process_completions[route_position].route_artifact_fingerprint
                 == route_fingerprint,
         "analysis rejected: completion binding"
@@ -6023,7 +5928,7 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
         campaign_id: build_receipt.campaign_id,
         manifest: manifest_fingerprint,
         plan: plan_fingerprint,
-        selected_route_benchmark_id: route_expectation.benchmark_id.to_owned(),
+        selected_route_benchmark_id: route_expectation.full_benchmark_id.to_owned(),
         selected_route_artifact: route_fingerprint,
         source_archive: source_archive_fingerprint,
         cargo_lock: cargo_lock_fingerprint,
@@ -12354,6 +12259,8 @@ mod tests {
         let genesis_fingerprint = append_fixture_segment_record(&mut segment_bytes, &genesis);
         let process_identity_pseudonym = "E".repeat(64);
         let mut process_completions = Vec::with_capacity(10_560);
+        let qualification_schedule =
+            schedule::QualificationSchedule::new(&plan, &manifest).expect("schedule");
         for round in 0_u32..20 {
             for cell in 0_u32..66 {
                 for expansion in 0_u32..8 {
@@ -12362,9 +12269,14 @@ mod tests {
                     let event_base = u64::from(process_position) * 3;
                     let monotonic_base = 1_000 + event_base;
                     let timing_process_id = format!("r{round:02}-c{cell:02}-e{expansion}");
-                    let benchmark_id = route_expectation(&manifest, round, cell, expansion)
+                    let benchmark_id = qualification_schedule
+                        .get(schedule::ProcessCoordinate {
+                            global_round: round,
+                            cell,
+                            expansion,
+                        })
                         .expect("route expectation")
-                        .benchmark_id
+                        .full_benchmark_id
                         .to_owned();
                     let selected_route = if (round, cell, expansion) == (0, 0, 1) {
                         route_fingerprint.clone()
@@ -12862,8 +12774,14 @@ mod tests {
         assert_eq!(error, "analysis rejected: total evidence bytes");
 
         assert_eq!(
-            validate_route_relative_path(Path::new("routes/r00_c00_e0.ndjson")),
-            Some((0, 0, 0))
+            schedule::QualificationSchedule::parse_route_path(Path::new(
+                "routes/r00_c00_e0.ndjson"
+            )),
+            Some(schedule::ProcessCoordinate {
+                global_round: 0,
+                cell: 0,
+                expansion: 0
+            })
         );
         for path in [
             "routes/r0_c00_e0.ndjson",
@@ -12874,7 +12792,10 @@ mod tests {
             "routes/../r00_c00_e0.ndjson",
             "routes\\r00_c00_e0.ndjson",
         ] {
-            assert_eq!(validate_route_relative_path(Path::new(path)), None);
+            assert_eq!(
+                schedule::QualificationSchedule::parse_route_path(Path::new(path)),
+                None
+            );
         }
     }
 

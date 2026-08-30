@@ -61,12 +61,22 @@ Cargo.lock, typed controller and monitor configurations, the typed build
 receipt and streamed build-input archive, installed binary fingerprints, the
 anchored genesis, the terminal segment's bounded record envelopes and footer
 summary, and both offline anchor signatures and their same-clock publication
-bound. Terminal-envelope validation binds the recognized schema tag, campaign,
-segment and contiguous record ordinals, exact UTC grammar, nondecreasing
-monotonic values, the header/footer time bounds, and the five reconstructed
-per-segment type counters. It does not parse each lifecycle record's complete
-deny-unknown payload shape, reserialize its canonical bytes, or validate its
-payload semantics. Governed inputs are opened relative to
+bound. For each record using one of the six lifecycle variants in either
+inspected segment, typed validation requires the frozen complete deny-unknown
+payload shape and exact compact canonical bytes: continuation, sample,
+process-intent, process-start, process-finish, and attestation-transition. The
+segment-zero genesis header is separately typed and canonicalized, as is only
+the terminal segment footer. When the genesis and terminal segments differ,
+the nonterminal footer ending the inspected genesis segment is outside this
+payload-validation slice. Payload shape and canonicality do not establish
+lifecycle semantics. Structural inspection of non-footer envelopes in both
+inspected segments separately binds campaign, segment and contiguous record
+ordinals, exact UTC grammar, and nondecreasing monotonic values. Validation
+of the terminal segment footer alone additionally binds its header/footer
+time bounds and the five reconstructed terminal-segment type counters. The
+analyzer does not traverse or chain
+intermediate segments, or validate complete within-record and cross-record
+lifecycle semantics. Governed inputs are opened relative to
 retained directory handles without following links; regular files must have
 one link and remain the same size, identity, and stable metadata through their
 exact-length read. Unix file and directory-component opens also set
@@ -85,11 +95,12 @@ race-resistant against a hostile concurrent ancestry swap. The destination
 must be outside the retained campaign root. Its scope is
 `offline_artifact_integrity_subset_v1`; it always records campaign
 qualification as `not_evaluated` and production-threshold activation as
-`false`. Intermediate run-validity segments and records, all route/Criterion
-artifacts, statistics, threshold discovery, and re-execution of the retained
-build tree's offline dependency-resolution probe remain separate future
-analyzer phases. The current slice verifies the receipt's exact probe command
-and retained result; it does not materialize that tree or run the command. It
+`false`. Intermediate run-validity segment traversal and chain validation,
+lifecycle semantics, all route/Criterion artifacts, statistics, threshold
+discovery, and re-execution of the retained build tree's offline
+dependency-resolution probe remain separate future analyzer phases. The
+current slice verifies the receipt's exact probe command and retained result;
+it does not materialize that tree or run the command. It
 also does not validate first-quiet-window contents or prove the build began
 after that window. Run analysis only against a quiescent campaign directory or
 an immutable filesystem snapshot: per-file handle binding does not make the

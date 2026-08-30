@@ -170,6 +170,7 @@ pub(super) fn criterion_median(bytes: &[u8]) -> Result<f64> {
     Ok(parsed.median.point_estimate)
 }
 
+#[cfg(test)]
 pub(super) fn round_effects(values: [f64; 8], order: &str) -> Result<[f64; 4]> {
     anyhow::ensure!(values.iter().all(|value| value.is_finite() && *value > 0.0));
     let logs = values.map(f64::ln);
@@ -193,6 +194,7 @@ pub(super) fn round_effects(values: [f64; 8], order: &str) -> Result<[f64; 4]> {
     ])
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct EffectIntervals {
     pub observed: [f64; 4],
@@ -200,9 +202,11 @@ pub(super) struct EffectIntervals {
     pub upper: [f64; 4],
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct SplitMix64(u64);
 
+#[cfg(test)]
 impl SplitMix64 {
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -217,6 +221,7 @@ impl SplitMix64 {
     }
 }
 
+#[cfg(test)]
 fn sample_index(upper: usize, mut next: impl FnMut() -> u64) -> Result<usize> {
     anyhow::ensure!(upper > 0, "bootstrap requires rounds");
     let upper_u64 = u64::try_from(upper)?;
@@ -235,6 +240,7 @@ fn sample_index(upper: usize, mut next: impl FnMut() -> u64) -> Result<usize> {
     clippy::cast_sign_loss,
     reason = "bounded bootstrap vector indices are exactly representable at campaign limits"
 )]
+#[cfg(test)]
 fn type_7(values: &mut [f64], probability: f64) -> Result<f64> {
     anyhow::ensure!(!values.is_empty() && (0.0..=1.0).contains(&probability));
     anyhow::ensure!(values.iter().all(|value| value.is_finite()));
@@ -249,6 +255,7 @@ fn type_7(values: &mut [f64], probability: f64) -> Result<f64> {
     clippy::cast_precision_loss,
     reason = "validated campaign round counts are at most twenty"
 )]
+#[cfg(test)]
 pub(super) fn bootstrap(
     cells: &[Vec<[f64; 4]>],
     replicates: usize,

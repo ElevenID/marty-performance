@@ -30,7 +30,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, Variant, Version};
 
-#[cfg(test)]
+mod evidence_validation;
 mod statistics;
 
 const MANIFEST_SCHEMA: &str = "sd_jwt_issuance_qualification_manifest_v1";

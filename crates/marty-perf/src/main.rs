@@ -262,6 +262,17 @@ struct IssuanceQualificationAnalyzeArgs {
     output: PathBuf,
 }
 
+impl IssuanceQualificationAnalyzeArgs {
+    fn analysis_request(&self) -> issuance_qualification::IssuanceAnalysisRequest<'_> {
+        issuance_qualification::IssuanceAnalysisRequest {
+            campaign_root: &self.campaign_root,
+            route_artifact: &self.route_artifact,
+            anchor_public_key: &self.anchor_public_key,
+            output: &self.output,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct ScenarioArgs {
     #[command(subcommand)]
@@ -344,35 +355,32 @@ fn main() -> Result<()> {
                 IssuanceQualificationCommand::Plan(args) => {
                     issuance_qualification::write_plan(&args.manifest, &args.output)
                 }
-                IssuanceQualificationCommand::Analyze(args) => issuance_qualification::analyze(
-                    &issuance_qualification::IssuanceAnalysisRequest {
-                        campaign_root: &args.campaign_root,
-                        route_artifact: &args.route_artifact,
-                        anchor_public_key: &args.anchor_public_key,
-                        output: &args.output,
-                    },
-                ),
+                IssuanceQualificationCommand::Analyze(args) => {
+                    issuance_qualification::analyze(&args.analysis_request())
+                }
             },
         },
     }
 }
+
 #[cfg(test)]
 mod qualification_analyze_cli_tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
-    fn analyze_command_requires_and_preserves_all_offline_inputs() {
+    fn analyze_command_preserves_all_offline_inputs_through_dispatch() {
         let cli = Cli::try_parse_from([
             "marty-perf",
             "qualification",
             "issuance",
             "analyze",
             "--campaign-root",
-            "/campaign",
+            "/campaign-root",
             "--route-artifact",
             "routes/r00_c00_e0.ndjson",
             "--anchor-public-key",
-            "/trust/anchor.bin",
+            "/trust/anchor-public-key.bin",
             "--output",
             "/reports/analysis.json",
         ])
@@ -384,12 +392,17 @@ mod qualification_analyze_cli_tests {
         let IssuanceQualificationCommand::Analyze(args) = issuance.command else {
             panic!("analyze command")
         };
-        assert_eq!(args.campaign_root, PathBuf::from("/campaign"));
+
+        let request = args.analysis_request();
+        assert_eq!(request.campaign_root, Path::new("/campaign-root"));
         assert_eq!(
-            args.route_artifact,
-            PathBuf::from("routes/r00_c00_e0.ndjson")
+            request.route_artifact,
+            Path::new("routes/r00_c00_e0.ndjson")
         );
-        assert_eq!(args.anchor_public_key, PathBuf::from("/trust/anchor.bin"));
-        assert_eq!(args.output, PathBuf::from("/reports/analysis.json"));
+        assert_eq!(
+            request.anchor_public_key,
+            Path::new("/trust/anchor-public-key.bin")
+        );
+        assert_eq!(request.output, Path::new("/reports/analysis.json"));
     }
 }

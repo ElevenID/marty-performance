@@ -15,20 +15,27 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
+fs_at.workspace = true
 hex.workspace = true
 marty-perf-schema = { path = "../marty-perf-schema" }
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
+tempfile.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
-ed25519-dalek.workspace = true
 hmac.workspace = true
-sha1.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

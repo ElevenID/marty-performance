@@ -45,6 +45,67 @@ pre-analysis protocol before building or timing:
       --manifest <canonical-manifest.json> \
       --output <absolute-new-plan.json>
 
+The offline analyzer validates the currently implemented artifact-integrity
+slice from fixed campaign roles without launching a controller, benchmark, or
+network request:
+
+    cargo run --locked -- qualification issuance analyze \
+      --campaign-root <absolute-campaign-root> \
+      --route-artifact routes/r00_c00_e0.ndjson \
+      --anchor-public-key <out-of-band-raw-32-byte-ed25519-key> \
+      --output <absolute-new-analysis.json>
+
+It verifies the exact V3 plan/manifest binding, the coordinate-selected route
+record against the retained hardware profile, the source Git tree/commit and
+Cargo.lock, typed controller and monitor configurations, the typed build
+receipt and streamed build-input archive, installed binary fingerprints, the
+anchored genesis, the terminal segment's bounded record envelopes and footer
+summary, and both offline anchor signatures and their same-clock publication
+bound. Terminal-envelope validation binds the recognized schema tag, campaign,
+segment and contiguous record ordinals, exact UTC grammar, nondecreasing
+monotonic values, the header/footer time bounds, and the five reconstructed
+per-segment type counters. It does not parse each lifecycle record's complete
+deny-unknown payload shape, reserialize its canonical bytes, or validate its
+payload semantics. Governed inputs are opened relative to
+retained directory handles without following links; regular files must have
+one link and remain the same size, identity, and stable metadata through their
+exact-length read. Unix file and directory-component opens also set
+nonblocking and no-controlling-terminal flags before the retained-handle type
+check, so FIFO substitutions reject instead of waiting for a peer and device
+leaves cannot acquire a controlling terminal before type rejection. The
+output is deterministic create-new canonical JSON,
+published without replacement through a same-directory temporary file on
+supported local filesystems and synced as a file. Parent-directory durability
+is also synced on Unix; exact crash durability and no-replace rename behavior
+remain operating-system and filesystem properties. Temporary-file creation
+and final publication are pathname-based, so the output-parent path and its
+ancestry must remain quiescent for the entire analysis; retained-handle checks
+make observed namespace changes fail closed but do not make publication
+race-resistant against a hostile concurrent ancestry swap. The destination
+must be outside the retained campaign root. Its scope is
+`offline_artifact_integrity_subset_v1`; it always records campaign
+qualification as `not_evaluated` and production-threshold activation as
+`false`. Intermediate run-validity segments and records, all route/Criterion
+artifacts, statistics, threshold discovery, and re-execution of the retained
+build tree's offline dependency-resolution probe remain separate future
+analyzer phases. The current slice verifies the receipt's exact probe command
+and retained result; it does not materialize that tree or run the command. It
+also does not validate first-quiet-window contents or prove the build began
+after that window. Run analysis only against a quiescent campaign directory or
+an immutable filesystem snapshot: per-file handle binding does not make the
+multi-file traversal one atomic snapshot.
+
+The report is always nonactivating. If a file or parent durability/identity
+check fails after the create-new publication step, the command returns an
+error, but the already published nonactivating report may remain. The analyzer
+does not attempt a pathname cleanup that could target a concurrently replaced
+entry.
+
+`--anchor-public-key` is an operator-selected trust input. It must be an
+absolute, read-only, single-link 32-byte file outside the campaign tree. The
+analyzer proves that the campaign configuration and signatures bind that key;
+it does not prove that the key was independently preconfigured or trusted.
+
 The plan command rejects changed matrix cardinality, route or estimator
 versions, noncanonical bytes, activated production thresholds, reused
 benchmark IDs, and an existing output. A compiled 1 MiB cap is enforced before
@@ -180,9 +241,12 @@ probe and a real `cargo metadata --frozen --offline --locked --format-version
 1` dependency-resolution probe under the same cleared environment, staged
 tree, network prohibition, and read sandbox; both must succeed and are bound in
 the v2 receipt. The success boolean is a trusted-controller attestation, not a
-substitute for retained inputs: the analyzer reconstructs the same tree and
-repeats the exact offline metadata probe, and any failure or dependency drift
-invalidates the campaign. Isolated Cargo, target, and temporary directories are used,
+substitute for retained inputs. The frozen complete qualification protocol
+requires its full analyzer to reconstruct the same tree, repeat the exact
+offline metadata probe, and invalidate the campaign on failure or dependency
+drift. The current `offline_artifact_integrity_subset_v1` command instead
+verifies the typed receipt and every retained archive member byte but does not
+materialize that tree or rerun the probe. Isolated Cargo, target, and temporary directories are used,
 wrappers and ambient flags are forbidden, and the sandbox rejects any
 uninventoried readable input or write outside its declared outputs. The trusted
 controller creates the receipt after the first quiet window and before

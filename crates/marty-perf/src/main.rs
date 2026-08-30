@@ -232,6 +232,8 @@ struct IssuanceQualificationArgs {
 enum IssuanceQualificationCommand {
     /// Validate a canonical manifest and freeze the pre-analysis plan.
     Plan(IssuanceQualificationPlanArgs),
+    /// Validate the bounded offline artifact-integrity slice without qualifying it.
+    Analyze(IssuanceQualificationAnalyzeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +244,33 @@ struct IssuanceQualificationPlanArgs {
     /// Absolute create-new destination for the frozen qualification plan.
     #[arg(long)]
     output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct IssuanceQualificationAnalyzeArgs {
+    /// Absolute root of the retained V3 campaign evidence.
+    #[arg(long)]
+    campaign_root: PathBuf,
+    /// Exact campaign-relative route path, for example `routes/r00_c00_e0.ndjson`.
+    #[arg(long)]
+    route_artifact: PathBuf,
+    /// Operator-selected, read-only file outside the campaign with 32 raw Ed25519 key bytes.
+    #[arg(long)]
+    anchor_public_key: PathBuf,
+    /// Absolute create-new report destination outside the retained campaign root.
+    #[arg(long)]
+    output: PathBuf,
+}
+
+impl IssuanceQualificationAnalyzeArgs {
+    fn analysis_request(&self) -> issuance_qualification::IssuanceAnalysisRequest<'_> {
+        issuance_qualification::IssuanceAnalysisRequest {
+            campaign_root: &self.campaign_root,
+            route_artifact: &self.route_artifact,
+            anchor_public_key: &self.anchor_public_key,
+            output: &self.output,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -326,7 +355,54 @@ fn main() -> Result<()> {
                 IssuanceQualificationCommand::Plan(args) => {
                     issuance_qualification::write_plan(&args.manifest, &args.output)
                 }
+                IssuanceQualificationCommand::Analyze(args) => {
+                    issuance_qualification::analyze(&args.analysis_request())
+                }
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod qualification_analyze_cli_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn analyze_command_preserves_all_offline_inputs_through_dispatch() {
+        let cli = Cli::try_parse_from([
+            "marty-perf",
+            "qualification",
+            "issuance",
+            "analyze",
+            "--campaign-root",
+            "/campaign-root",
+            "--route-artifact",
+            "routes/r00_c00_e0.ndjson",
+            "--anchor-public-key",
+            "/trust/anchor-public-key.bin",
+            "--output",
+            "/reports/analysis.json",
+        ])
+        .expect("parse analyzer command");
+        let Command::Qualification(qualification) = cli.command else {
+            panic!("qualification command")
+        };
+        let QualificationCommand::Issuance(issuance) = qualification.command;
+        let IssuanceQualificationCommand::Analyze(args) = issuance.command else {
+            panic!("analyze command")
+        };
+
+        let request = args.analysis_request();
+        assert_eq!(request.campaign_root, Path::new("/campaign-root"));
+        assert_eq!(
+            request.route_artifact,
+            Path::new("routes/r00_c00_e0.ndjson")
+        );
+        assert_eq!(
+            request.anchor_public_key,
+            Path::new("/trust/anchor-public-key.bin")
+        );
+        assert_eq!(request.output, Path::new("/reports/analysis.json"));
     }
 }

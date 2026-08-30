@@ -20,6 +20,9 @@ The foundation milestone provides:
   and soak execution profiles;
 - deterministic Rust-generated lifecycle fixtures and an authenticated
   management-plane workload;
+- frozen SD-JWT issuance planning plus a bounded offline artifact-integrity
+  analyzer that uses handle-bound inputs and does not claim qualification or
+  activate thresholds;
 - stable JSON artifacts suitable for later comparison and publication.
 
 Broader lifecycle, issuance, verification, stress, burst, and soak scenarios

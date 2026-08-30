@@ -1,9 +1,4 @@
 //! Frozen, deterministic planning for SD-JWT issuance qualification.
-#![allow(
-    dead_code,
-    unused_imports,
-    reason = "temporary until the analyzer pipeline commit wires the promoted layers"
-)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -3848,6 +3843,45 @@ impl AnalysisReadBudget {
     }
 }
 
+/// Inputs for one bounded offline artifact-integrity analysis.
+pub(crate) struct IssuanceAnalysisRequest<'a> {
+    /// Absolute root of the retained campaign evidence.
+    pub campaign_root: &'a Path,
+    /// Exact campaign-relative path of one selected route artifact.
+    pub route_artifact: &'a Path,
+    /// Out-of-band raw 32-byte Ed25519 public-key file.
+    pub anchor_public_key: &'a Path,
+    /// Absolute create-new report destination.
+    pub output: &'a Path,
+}
+
+#[derive(Serialize)]
+struct IssuanceAnalysisReport {
+    schema: &'static str,
+    analysis_scope: &'static str,
+    campaign_id: String,
+    manifest: ArtifactFingerprint,
+    plan: ArtifactFingerprint,
+    selected_route_benchmark_id: String,
+    selected_route_artifact: ArtifactFingerprint,
+    source_archive: ArtifactFingerprint,
+    cargo_lock: ArtifactFingerprint,
+    hardware_profile: ArtifactFingerprint,
+    build_receipt: ArtifactFingerprint,
+    build_input_inventory: ArtifactFingerprint,
+    build_input_archive: ArtifactFingerprint,
+    fixed_binary: ArtifactFingerprint,
+    terminal_observation_receipt: ArtifactFingerprint,
+    terminal_observation_evidence: ArtifactFingerprint,
+    completion: ArtifactFingerprint,
+    completion_anchor: ArtifactFingerprint,
+    checks: Vec<&'static str>,
+    artifact_integrity_status: &'static str,
+    campaign_qualification_status: &'static str,
+    production_threshold_activation: bool,
+    limitations: Vec<&'static str>,
+}
+
 fn concrete_target_linker_environment_name(target_triple: &str) -> Option<String> {
     if target_triple.is_empty()
         || target_triple.len() > 128
@@ -5245,6 +5279,631 @@ fn validate_terminal_footer(
         && footer.process_finish_count == inspection.record_counts.process_finish
         && footer.attestation_transition_count == inspection.record_counts.attestation_transition
         && footer.closed_reason == "campaign_complete"
+}
+
+fn valid_analysis_output_file_name(value: &std::ffi::OsStr) -> bool {
+    value.to_str().is_some_and(|value| {
+        (1..=255).contains(&value.len())
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            && value
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && !windows_reserved_device_stem(value)
+    })
+}
+
+fn write_analysis_report(
+    output_path: &Path,
+    forbidden_directory: Option<FileIdentity>,
+    report: &IssuanceAnalysisReport,
+) -> Result<()> {
+    anyhow::ensure!(output_path.is_absolute(), "analysis rejected: output");
+    let parent = output_path.parent().context("analysis rejected: output")?;
+    let file_name = output_path
+        .file_name()
+        .filter(|name| valid_analysis_output_file_name(name))
+        .context("analysis rejected: output")?;
+    let parent_directory =
+        open_absolute_directory_excluding(parent, forbidden_directory, "output")?;
+    let parent_identity = verified_directory_identity(&parent_directory, "output")?;
+    let mut bytes = serde_json::to_vec_pretty(report).context("analysis rejected: output")?;
+    bytes.push(b'\n');
+    let output_length = u64::try_from(bytes.len()).context("analysis rejected: output")?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).context("analysis rejected: output")?;
+    anyhow::ensure!(
+        verified_directory_identity(
+            &open_absolute_directory_excluding(parent, forbidden_directory, "output")?,
+            "output",
+        )? == parent_identity,
+        "analysis rejected: output"
+    );
+    temporary
+        .write_all(&bytes)
+        .context("analysis rejected: output")?;
+    temporary.flush().context("analysis rejected: output")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("analysis rejected: output")?;
+    let output = temporary
+        .persist_noclobber(output_path)
+        .map_err(|_| anyhow::anyhow!("analysis rejected: output"))?;
+    output.sync_all().context("analysis rejected: output")?;
+    let output_snapshot = verified_file_snapshot(&output, output_length, "output")?;
+    anyhow::ensure!(
+        output_snapshot.byte_length == output_length,
+        "analysis rejected: output"
+    );
+    let retained_output = open_child_file(&parent_directory, file_name, output_length, "output")?;
+    let retained_snapshot = retained_output.snapshot;
+    anyhow::ensure!(
+        retained_snapshot == output_snapshot
+            && verified_directory_identity(
+                &open_absolute_directory_excluding(parent, forbidden_directory, "output")?,
+                "output",
+            )? == parent_identity,
+        "analysis rejected: output"
+    );
+    #[cfg(unix)]
+    parent_directory
+        .sync_all()
+        .context("analysis rejected: output")?;
+    Ok(())
+}
+
+/// Validate the bounded offline artifact-integrity slice of one V3 campaign.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ordered fail-closed verification pipeline keeps every cross-artifact binding visible"
+)]
+pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
+    let (round, cell, expansion) = validate_route_relative_path(request.route_artifact)
+        .context("analysis rejected: route artifact role")?;
+    let campaign = CampaignDirectory::open(request.campaign_root)?;
+    let mut read_budget = AnalysisReadBudget::default();
+
+    let manifest_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("inputs/qualification-manifest.json"),
+        MAX_MANIFEST_BYTES,
+        "manifest",
+    )?;
+    let manifest: SdJwtIssuanceQualificationManifest =
+        parse_canonical_pretty(&manifest_bytes, "manifest")?;
+    validate_manifest(&manifest).context("analysis rejected: manifest")?;
+    let manifest_fingerprint = fingerprint(&manifest_bytes)?;
+
+    let plan_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("inputs/qualification-plan.json"),
+        MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES,
+        "plan",
+    )?;
+    let plan: SdJwtIssuanceQualificationPlan = parse_canonical_pretty(&plan_bytes, "plan")?;
+    let expected_plan =
+        plan_for_manifest(&manifest, &manifest_bytes).context("analysis rejected: plan binding")?;
+    anyhow::ensure!(plan == expected_plan, "analysis rejected: plan binding");
+    let plan_fingerprint = fingerprint(&plan_bytes)?;
+
+    let hardware_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("profiles/hardware.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "hardware profile",
+    )?;
+    let hardware: HardwareProfileWire =
+        parse_canonical_pretty(&hardware_bytes, "hardware profile")?;
+    anyhow::ensure!(
+        valid_hardware_profile(&hardware),
+        "analysis rejected: hardware profile"
+    );
+    let hardware_fingerprint = fingerprint(&hardware_bytes)?;
+
+    let route_expectation = route_expectation(&manifest, round, cell, expansion)
+        .context("analysis rejected: route identity")?;
+    let route_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        request.route_artifact,
+        1024 * 1024,
+        "route artifact",
+    )?;
+    anyhow::ensure!(
+        valid_route_wire_bytes(
+            &route_bytes,
+            route_expectation.benchmark_id,
+            route_expectation.fixture_id,
+            route_expectation.stage,
+            route_expectation.requested,
+            u64::try_from(plan.worker_cap).context("analysis rejected: route worker cap")?,
+            u64::from(hardware.host_available_parallelism),
+        ),
+        "analysis rejected: route artifact"
+    );
+    let route_fingerprint = fingerprint(&route_bytes)?;
+
+    let cargo_lock_fingerprint = fingerprint_campaign_file(
+        &mut read_budget,
+        &campaign,
+        Path::new("inputs/Cargo.lock"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "Cargo.lock",
+    )?;
+
+    let build_receipt_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("build/fixed-benchmark.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "build receipt",
+    )?;
+    let build_receipt: FixedBinaryBuildReceiptWire =
+        parse_canonical_pretty(&build_receipt_bytes, "build receipt")?;
+    anyhow::ensure!(
+        valid_campaign_id(&build_receipt.campaign_id)
+            && hardware.campaign_id == build_receipt.campaign_id
+            && target_matches_hardware(&build_receipt.target_triple, &hardware),
+        "analysis rejected: campaign identity"
+    );
+
+    let source_archive_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("source/exact-tree.sar"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "source archive",
+    )?;
+    let source_archive_fingerprint = fingerprint(&source_archive_bytes)?;
+    let validated_source = validate_source_archive_bytes(
+        &source_archive_bytes,
+        &build_receipt.source_archive_fingerprint,
+        &cargo_lock_fingerprint,
+    )
+    .context("analysis rejected: source archive")?;
+
+    let inventory_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("build/input-inventory.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "build-input inventory",
+    )?;
+    let inventory: BuildInputInventory =
+        parse_canonical_pretty(&inventory_bytes, "build-input inventory")?;
+    let inventory_fingerprint = fingerprint(&inventory_bytes)?;
+
+    let build_archive_input = campaign.open_file(
+        Path::new("build/input-files.bia"),
+        MAX_FIXED_BUILD_INPUT_BYTES,
+        "build-input archive",
+    )?;
+    read_budget.charge(&build_archive_input)?;
+    validate_build_input_archive_file(
+        build_archive_input,
+        &inventory,
+        &build_receipt.build_input_archive_fingerprint,
+    )?;
+    let build_archive_fingerprint = build_receipt.build_input_archive_fingerprint.clone();
+
+    let windows = build_receipt
+        .target_triple
+        .split('-')
+        .any(|component| component == "windows");
+    let controller_relative = if windows {
+        "bin/controller.exe"
+    } else {
+        "bin/controller"
+    };
+    let monitor_relative = if windows {
+        "bin/monitor.exe"
+    } else {
+        "bin/monitor"
+    };
+    let fixed_binary_relative = if windows {
+        "bin/fixed-benchmark.exe"
+    } else {
+        "bin/fixed-benchmark"
+    };
+    let controller_fingerprint = fingerprint_campaign_file(
+        &mut read_budget,
+        &campaign,
+        Path::new(controller_relative),
+        MAX_FIXED_BUILD_INPUT_BYTES,
+        "controller binary",
+    )?;
+    let fixed_binary_fingerprint = fingerprint_campaign_file(
+        &mut read_budget,
+        &campaign,
+        Path::new(fixed_binary_relative),
+        MAX_FIXED_BUILD_INPUT_BYTES,
+        "fixed binary",
+    )?;
+    let monitor_fingerprint = fingerprint_campaign_file(
+        &mut read_budget,
+        &campaign,
+        Path::new(monitor_relative),
+        MAX_FIXED_BUILD_INPUT_BYTES,
+        "monitor binary",
+    )?;
+    anyhow::ensure!(
+        validate_build_receipt(
+            &build_receipt,
+            &BuildReceiptValidation {
+                inventory: &inventory,
+                source: &validated_source,
+                source_archive_fingerprint: &source_archive_fingerprint,
+                cargo_lock_fingerprint: &cargo_lock_fingerprint,
+                inventory_fingerprint: &inventory_fingerprint,
+                archive_fingerprint: &build_archive_fingerprint,
+                controller_fingerprint: &controller_fingerprint,
+                fixed_binary_fingerprint: &fixed_binary_fingerprint,
+            },
+        ),
+        "analysis rejected: build receipt"
+    );
+    let build_receipt_fingerprint = fingerprint(&build_receipt_bytes)?;
+
+    let controller_configuration_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("configuration/controller.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "controller configuration",
+    )?;
+    let controller_configuration: ControllerConfigurationWire =
+        parse_canonical_pretty(&controller_configuration_bytes, "controller configuration")?;
+    anyhow::ensure!(
+        valid_controller_configuration(
+            &controller_configuration,
+            &build_receipt.campaign_id,
+            &plan_fingerprint,
+            &plan,
+        ),
+        "analysis rejected: controller configuration"
+    );
+    let controller_configuration_fingerprint = fingerprint(&controller_configuration_bytes)?;
+
+    let monitor_configuration_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("configuration/monitor.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "monitor configuration",
+    )?;
+    let monitor_configuration: MonitorConfigurationWire =
+        parse_canonical_pretty(&monitor_configuration_bytes, "monitor configuration")?;
+    anyhow::ensure!(
+        valid_monitor_configuration(
+            &monitor_configuration,
+            &build_receipt.campaign_id,
+            &plan_fingerprint,
+            &plan,
+        ),
+        "analysis rejected: monitor configuration"
+    );
+    let monitor_configuration_fingerprint = fingerprint(&monitor_configuration_bytes)?;
+
+    let anchor_key_input = open_absolute_file(
+        request.anchor_public_key,
+        32,
+        Some(campaign.identity),
+        "anchor trust root",
+    )?;
+    anyhow::ensure!(
+        anchor_key_input.snapshot.readonly,
+        "analysis rejected: anchor trust root"
+    );
+    let anchor_key_bytes = read_opened_input(anchor_key_input, 32, "anchor trust root")?;
+    let anchor_key: [u8; 32] = anchor_key_bytes
+        .as_slice()
+        .try_into()
+        .context("analysis rejected: anchor trust root")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&anchor_key).context("analysis rejected: anchor trust root")?;
+    let anchor_key_fingerprint = fingerprint(&anchor_key_bytes)?;
+
+    let anchor_configuration_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("configuration/external-anchor-channel.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "anchor configuration",
+    )?;
+    let anchor_configuration: ExternalAnchorChannelWire =
+        parse_canonical_pretty(&anchor_configuration_bytes, "anchor configuration")?;
+    anyhow::ensure!(
+        anchor_configuration.schema
+            == "marty.performance/sd-jwt-issuance-external-anchor-channel/v1"
+            && anchor_configuration.campaign_id == build_receipt.campaign_id
+            && anchor_configuration.channel_id == "marty-sd-jwt-issuance-anchor-v1"
+            && anchor_configuration.channel_kind == "signed_create_only_log_v1"
+            && anchor_configuration.endpoint_role == "preconfigured_primary_anchor_connector"
+            && anchor_configuration.log_id == "sd-jwt-issuance-qualification-v1"
+            && anchor_configuration.connector_authentication_policy
+                == "out_of_band_trust_root_authenticated_transport_v1"
+            && anchor_configuration.receipt_verification_scheme
+                == "ed25519_rfc8032_canonical_json_v1"
+            && anchor_configuration.signing_key_id == "marty-sd-jwt-issuance-anchor-ed25519-v1"
+            && anchor_configuration.trust_root_fingerprint == anchor_key_fingerprint
+            && anchor_configuration.clock_policy
+                == "signed_nonrollback_monotonic_session_si_nanoseconds_v1"
+            && anchor_configuration.maximum_receipt_bytes == MAX_EXTERNAL_ANCHOR_V1_BYTES,
+        "analysis rejected: anchor configuration"
+    );
+    let anchor_configuration_fingerprint = fingerprint(&anchor_configuration_bytes)?;
+
+    let expected_anchor_entries = [
+        OsString::from("completion-anchor.json"),
+        OsString::from("terminal-observation-evidence.json"),
+        OsString::from("terminal-observation-receipt.json"),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    campaign.validate_exact_directory_entries(
+        Path::new("anchors"),
+        &expected_anchor_entries,
+        "anchor inventory",
+    )?;
+
+    let terminal_receipt_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("anchors/terminal-observation-receipt.json"),
+        MAX_EXTERNAL_ANCHOR_V1_BYTES,
+        "terminal receipt",
+    )?;
+    anyhow::ensure!(
+        valid_terminal_receipt_bytes(&terminal_receipt_bytes, &verifying_key),
+        "analysis rejected: terminal receipt"
+    );
+    let terminal_receipt: TerminalObservationReceiptWire =
+        serde_json::from_slice(&terminal_receipt_bytes)
+            .context("analysis rejected: terminal receipt")?;
+    let terminal_receipt_fingerprint = fingerprint(&terminal_receipt_bytes)?;
+
+    let terminal_evidence_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("anchors/terminal-observation-evidence.json"),
+        MAX_SOURCE_ARCHIVE_V1_BYTES,
+        "terminal observation evidence",
+    )?;
+    let terminal_evidence: TerminalObservationEvidenceWire =
+        parse_canonical_pretty(&terminal_evidence_bytes, "terminal observation evidence")?;
+    let terminal_evidence_fingerprint = fingerprint(&terminal_evidence_bytes)?;
+
+    let completion_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("completion.json"),
+        32 * 1024 * 1024,
+        "completion",
+    )?;
+    let completion: CompletionWire = parse_canonical_pretty(&completion_bytes, "completion")?;
+    anyhow::ensure!(
+        validate_completion(
+            &completion,
+            &build_receipt.campaign_id,
+            &manifest,
+            &plan_fingerprint,
+            &manifest_fingerprint,
+            &anchor_configuration_fingerprint,
+            plan.global_rounds
+                .run_validity
+                .limits
+                .maximum_campaign_seconds,
+        ),
+        "analysis rejected: completion"
+    );
+    let completion_fingerprint = fingerprint(&completion_bytes)?;
+    let genesis_segment = inspect_campaign_segment(
+        &mut read_budget,
+        &campaign,
+        Path::new("segments/segment-0000.ndjson"),
+        "genesis segment",
+    )?;
+    let genesis: GenesisHeaderWire =
+        parse_canonical_compact_line(&genesis_segment.first_line, "genesis header")?;
+    let genesis_fingerprint = fingerprint(&genesis_segment.first_line)?;
+    anyhow::ensure!(
+        completion.ordered_segment_fingerprints.first() == Some(&genesis_segment.fingerprint)
+            && completion.genesis_header_fingerprint == genesis_fingerprint
+            && completion.first_quiet_window_evidence_fingerprint
+                == genesis.first_quiet_window_evidence_fingerprint
+            && completion
+                .ordered_test_window_attestation_fingerprints
+                .first()
+                == Some(&genesis.initial_test_window_attestation_fingerprint)
+            && validate_genesis(
+                &genesis,
+                &GenesisValidation {
+                    campaign_id: &build_receipt.campaign_id,
+                    plan: &plan_fingerprint,
+                    manifest: &manifest_fingerprint,
+                    fixed_binary: &fixed_binary_fingerprint,
+                    build_receipt: &build_receipt_fingerprint,
+                    monitor_binary: &monitor_fingerprint,
+                    controller_binary: &controller_fingerprint,
+                    controller_configuration: &controller_configuration_fingerprint,
+                    monitor_configuration: &monitor_configuration_fingerprint,
+                    anchor_configuration: &anchor_configuration_fingerprint,
+                    source_archive: &source_archive_fingerprint,
+                    cargo_lock: &cargo_lock_fingerprint,
+                    hardware_profile: &hardware_fingerprint,
+                    source: &validated_source,
+                    build: &build_receipt,
+                    first_monotonic_nanoseconds: completion.first_monotonic_nanoseconds,
+                },
+            ),
+        "analysis rejected: genesis binding"
+    );
+    let terminal_segment = if completion.segment_count == 1 {
+        genesis_segment
+    } else {
+        let terminal_segment_relative = format!(
+            "segments/segment-{:04}.ndjson",
+            completion.segment_count - 1
+        );
+        inspect_campaign_segment(
+            &mut read_budget,
+            &campaign,
+            Path::new(&terminal_segment_relative),
+            "terminal segment",
+        )?
+    };
+    let terminal_footer: SegmentFooterWire =
+        parse_canonical_compact_line(&terminal_segment.last_line, "terminal footer")?;
+    let terminal_segment_fingerprint = terminal_segment.fingerprint.clone();
+    let route_position = usize::try_from(
+        round
+            .checked_mul(528)
+            .and_then(|value| value.checked_add(cell * 8))
+            .and_then(|value| value.checked_add(expansion))
+            .context("analysis rejected: route coordinate")?,
+    )
+    .context("analysis rejected: route coordinate")?;
+    anyhow::ensure!(
+        completion.terminal_segment_fingerprint == terminal_segment_fingerprint
+            && validate_terminal_footer(
+                &terminal_footer,
+                &terminal_segment,
+                &build_receipt.campaign_id,
+                completion.segment_count - 1,
+                completion.last_monotonic_nanoseconds,
+                plan.global_rounds
+                    .run_validity
+                    .limits
+                    .maximum_segment_seconds,
+            )
+            && completion.terminal_observation_evidence_fingerprint
+                == terminal_evidence_fingerprint
+            && completion.process_completions[route_position].full_benchmark_id
+                == route_expectation.benchmark_id
+            && completion.process_completions[route_position].route_artifact_fingerprint
+                == route_fingerprint,
+        "analysis rejected: completion binding"
+    );
+
+    let completion_anchor_bytes = read_campaign_input(
+        &mut read_budget,
+        &campaign,
+        Path::new("anchors/completion-anchor.json"),
+        MAX_EXTERNAL_ANCHOR_V1_BYTES,
+        "completion anchor",
+    )?;
+    anyhow::ensure!(
+        valid_completion_anchor_bytes(&completion_anchor_bytes, &verifying_key),
+        "analysis rejected: completion anchor"
+    );
+    let completion_anchor: CompletionAnchorWire = serde_json::from_slice(&completion_anchor_bytes)
+        .context("analysis rejected: completion anchor")?;
+    let completion_anchor_fingerprint = fingerprint(&completion_anchor_bytes)?;
+    let controller_delay = terminal_evidence
+        .controller_receipt_observed_monotonic_nanoseconds
+        .checked_sub(terminal_receipt.terminal_footer_monotonic_nanoseconds)
+        .context("analysis rejected: anchor chronology")?;
+    let channel_delay = completion_anchor
+        .channel_monotonic_nanoseconds
+        .checked_sub(terminal_receipt.channel_monotonic_nanoseconds)
+        .context("analysis rejected: anchor chronology")?;
+    let publication_delay = controller_delay
+        .checked_add(channel_delay)
+        .context("analysis rejected: anchor chronology")?;
+    let maximum_publication_delay = u64::from(
+        plan.global_rounds
+            .run_validity
+            .limits
+            .maximum_anchor_publication_delay_seconds,
+    )
+    .checked_mul(1_000_000_000)
+    .context("analysis rejected: anchor chronology")?;
+    anyhow::ensure!(
+        terminal_receipt.campaign_id == build_receipt.campaign_id
+            && completion_anchor.campaign_id == build_receipt.campaign_id
+            && terminal_evidence.schema
+                == "marty.performance/sd-jwt-issuance-terminal-observation-evidence/v1"
+            && terminal_evidence.campaign_id == build_receipt.campaign_id
+            && terminal_evidence.terminal_observation_receipt_fingerprint
+                == terminal_receipt_fingerprint
+            && terminal_receipt.terminal_segment_fingerprint == terminal_segment_fingerprint
+            && terminal_receipt.terminal_footer_monotonic_nanoseconds
+                == terminal_footer.monotonic_nanoseconds
+            && completion_anchor.terminal_segment_fingerprint == terminal_segment_fingerprint
+            && completion_anchor.terminal_observation_evidence_fingerprint
+                == terminal_evidence_fingerprint
+            && completion_anchor.completion_fingerprint == completion_fingerprint
+            && terminal_receipt.channel_clock_session_id
+                == completion_anchor.channel_clock_session_id
+            && terminal_receipt.challenge_uppercase_hex_256
+                != completion_anchor.challenge_uppercase_hex_256
+            && terminal_receipt.controller_request_monotonic_nanoseconds
+                >= terminal_receipt.terminal_footer_monotonic_nanoseconds
+            && terminal_evidence.controller_receipt_observed_monotonic_nanoseconds
+                >= terminal_receipt.controller_request_monotonic_nanoseconds
+            && completion.created_at_monotonic_nanoseconds
+                >= terminal_evidence.controller_receipt_observed_monotonic_nanoseconds
+            && publication_delay <= maximum_publication_delay,
+        "analysis rejected: anchor binding"
+    );
+
+    let report = IssuanceAnalysisReport {
+        schema: "marty.performance/sd-jwt-issuance-analysis/v1",
+        analysis_scope: "offline_artifact_integrity_subset_v1",
+        campaign_id: build_receipt.campaign_id,
+        manifest: manifest_fingerprint,
+        plan: plan_fingerprint,
+        selected_route_benchmark_id: route_expectation.benchmark_id.to_owned(),
+        selected_route_artifact: route_fingerprint,
+        source_archive: source_archive_fingerprint,
+        cargo_lock: cargo_lock_fingerprint,
+        hardware_profile: hardware_fingerprint,
+        build_receipt: build_receipt_fingerprint,
+        build_input_inventory: inventory_fingerprint,
+        build_input_archive: build_archive_fingerprint,
+        fixed_binary: fixed_binary_fingerprint,
+        terminal_observation_receipt: terminal_receipt_fingerprint,
+        terminal_observation_evidence: terminal_evidence_fingerprint,
+        completion: completion_fingerprint,
+        completion_anchor: completion_anchor_fingerprint,
+        checks: vec![
+            "v3_plan_and_manifest_binding",
+            "selected_route_identity_and_invariants",
+            "source_archive_git_tree_commit_and_cargo_lock",
+            "build_input_inventory_and_streamed_archive",
+            "anchored_genesis_build_receipt_and_binary_binding",
+            "terminal_segment_structural_envelope_and_footer_summary_binding",
+            "offline_ed25519_anchor_signatures_and_chronology",
+        ],
+        artifact_integrity_status: "valid",
+        campaign_qualification_status: "not_evaluated",
+        production_threshold_activation: false,
+        limitations: vec![
+            "one_selected_route_artifact_only",
+            "intermediate_segment_chain_and_lifecycle_record_payload_shape_canonicality_and_semantics_not_analyzed",
+            "first_quiet_window_evidence_content_and_build_order_not_analyzed",
+            "retained_build_tree_offline_probe_not_reexecuted",
+            "operator_selected_anchor_key_trust_provenance_not_established",
+            "cross_file_consistency_requires_quiescent_or_snapshotted_campaign",
+            "output_parent_ancestry_requires_quiescent_namespace",
+            "failed_post_publication_verification_may_leave_a_nonactivating_create_new_report",
+            "report_publication_crash_durability_depends_on_operating_system_and_filesystem",
+            "no_performance_or_threshold_claim",
+        ],
+    };
+    write_analysis_report(request.output, Some(campaign.identity), &report)?;
+    println!(
+        "Validated the bounded offline artifact-integrity slice; campaign qualification remains not evaluated."
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -11489,475 +12148,118 @@ mod tests {
 }
 
 #[cfg(test)]
-mod promoted_validation_primitives_tests {
+mod analysis_report_tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
-    #[test]
-    fn promoted_primitives_are_bounded_and_fail_closed() {
-        assert!(valid_source_archive_path("Cargo.lock"));
-        assert!(!valid_source_archive_path("../Cargo.lock"));
-        assert!(valid_utc_rfc3339_nanoseconds(
-            "2024-02-29T23:59:59.123456789Z"
-        ));
-        assert!(!valid_utc_rfc3339_nanoseconds(
-            "0000-01-01T00:00:00.000000000Z"
-        ));
-        assert!(!valid_route_wire_bytes(
-            b"{}\n",
-            "benchmark",
-            "fixture",
-            "stage",
-            "serial",
-            1,
-            1,
-        ));
-        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
-        assert!(!valid_terminal_receipt_bytes(
-            b"{}\n",
-            &signing_key.verifying_key(),
-        ));
-        assert!(!valid_completion_anchor_bytes(
-            b"{}\n",
-            &signing_key.verifying_key(),
-        ));
-    }
-}
-
-#[cfg(test)]
-mod handle_bound_reader_tests {
-    use super::*;
-
-    #[test]
-    #[allow(
-        clippy::permissions_set_readonly_false,
-        reason = "Windows read-only attributes must be cleared before deleting the temporary key"
-    )]
-    fn governed_inputs_reject_hardlinks_campaign_keys_and_short_reads() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let original = temporary.path().join("original.bin");
-        let linked = temporary.path().join("linked.bin");
-        fs::write(&original, b"bound bytes").expect("write original");
-        fs::hard_link(&original, &linked).expect("create hard link");
-        let error = open_absolute_file(&linked, 64, None, "hardlinked artifact")
-            .expect_err("hard-linked input must reject")
-            .to_string();
-        assert_eq!(error, "analysis rejected: hardlinked artifact");
-        assert!(!error.contains("linked.bin"));
-
-        fs::remove_file(&linked).expect("remove hard link");
-        let input = open_absolute_file(&original, 64, None, "short artifact")
-            .expect("open single-linked input");
-        assert!(ensure_exact_snapshot_byte_length(
-            input.snapshot.byte_length - 1,
-            input.snapshot,
-            "short artifact",
-        )
-        .is_err());
-        assert_eq!(
-            read_bounded(&original, 64, "bounded artifact").expect("bounded read"),
-            b"bound bytes"
-        );
-
-        let campaign_path = temporary.path().join("campaign");
-        fs::create_dir(&campaign_path).expect("campaign directory");
-        let campaign_key = campaign_path.join("key.bin");
-        fs::write(&campaign_key, [0x42; 32]).expect("campaign key");
-        let mut permissions = fs::metadata(&campaign_key)
-            .expect("key metadata")
-            .permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&campaign_key, permissions).expect("readonly campaign key");
-        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
-        assert!(open_absolute_file(
-            &campaign_key,
-            32,
-            Some(campaign.identity),
-            "anchor trust root",
-        )
-        .is_err());
-        #[cfg(windows)]
-        {
-            let mut cleanup_permissions = fs::metadata(&campaign_key)
-                .expect("cleanup key metadata")
-                .permissions();
-            cleanup_permissions.set_readonly(false);
-            fs::set_permissions(&campaign_key, cleanup_permissions)
-                .expect("cleanup key permissions");
+    fn test_fingerprint(seed: u8) -> ArtifactFingerprint {
+        ArtifactFingerprint {
+            sha256: format!("{seed:02X}").repeat(32),
+            byte_length: u64::from(seed),
         }
     }
 
     #[test]
-    fn exact_directory_inventory_rejects_extras_with_bounded_state() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let campaign_path = temporary.path().join("campaign");
-        let anchors_path = campaign_path.join("anchors");
-        fs::create_dir_all(&anchors_path).expect("anchor directory");
-        let expected = [
-            OsString::from("completion-anchor.json"),
-            OsString::from("terminal-observation-evidence.json"),
-            OsString::from("terminal-observation-receipt.json"),
-        ]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-        for name in &expected {
-            fs::write(anchors_path.join(name), b"{}\n").expect("expected anchor");
-        }
-        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
-        campaign
-            .validate_exact_directory_entries(Path::new("anchors"), &expected, "anchor inventory")
-            .expect("exact inventory");
-        fs::write(anchors_path.join("junk.json"), b"{}\n").expect("junk anchor");
-        let error = campaign
-            .validate_exact_directory_entries(Path::new("anchors"), &expected, "anchor inventory")
-            .expect_err("overfilled inventory must reject")
-            .to_string();
-        assert_eq!(error, "analysis rejected: anchor inventory");
-        assert!(!error.contains("junk"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn intermediate_directory_symlink_is_rejected() {
-        use std::os::unix::fs::symlink;
-
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let campaign_path = temporary.path().join("campaign");
-        let outside_path = temporary.path().join("outside");
-        fs::create_dir(&campaign_path).expect("campaign directory");
-        fs::create_dir(&outside_path).expect("outside directory");
-        fs::write(outside_path.join("artifact.json"), b"{}\n").expect("outside artifact");
-        symlink(&outside_path, campaign_path.join("linked")).expect("directory symlink");
-        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
-        assert!(campaign
-            .open_file(Path::new("linked/artifact.json"), 16, "linked artifact")
-            .is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn governed_file_fifo_rejects_without_blocking() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        use rustix::fs::{mkfifoat, Mode};
-
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let parent = fs::File::open(temporary.path()).expect("open temporary directory");
-        mkfifoat(&parent, "artifact.fifo", Mode::RUSR | Mode::WUSR).expect("create FIFO");
-        let fifo_path = temporary.path().join("artifact.fifo");
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            sender
-                .send(open_absolute_file(&fifo_path, 16, None, "FIFO artifact").is_err())
-                .ok();
-        });
-        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)), Ok(true));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn traversed_directory_fifo_rejects_without_blocking() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        use rustix::fs::{mkfifoat, Mode};
-
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let campaign_path = temporary.path().join("campaign");
-        fs::create_dir(&campaign_path).expect("campaign directory");
-        let parent = fs::File::open(&campaign_path).expect("open campaign directory");
-        mkfifoat(&parent, "linked", Mode::RUSR | Mode::WUSR).expect("create FIFO");
-        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            sender
-                .send(
-                    campaign
-                        .open_file(Path::new("linked/artifact.json"), 16, "FIFO directory")
-                        .is_err(),
-                )
-                .ok();
-        });
-        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)), Ok(true));
-    }
-}
-
-#[cfg(test)]
-mod retained_evidence_validator_tests {
-    use super::*;
-
-    fn build_entry(role: &str, path: &str, mode: &str) -> BuildInputEntry {
-        BuildInputEntry {
-            role: role.to_owned(),
-            relative_path: path.to_owned(),
-            file_mode: mode.to_owned(),
-            fingerprint: ArtifactFingerprint {
-                sha256: "AA".repeat(32),
-                byte_length: 1,
-            },
-        }
-    }
-
-    #[test]
-    fn dynamic_dependency_resolution_is_indexed_and_equivalent() {
-        const PAIR_COUNT: usize = 4_096;
-        let paired = vec![
-            build_entry(
-                "target_linker_executable",
-                "tools/linker/paired/tool",
-                "100755",
-            ),
-            build_entry(
-                "tool_dynamic_dependency",
-                "tools/linker/paired/library.so",
-                "100644",
-            ),
-        ];
-        assert!(build_input_dynamic_dependencies_resolve(&paired));
-        let mut wrong_mode = paired.clone();
-        wrong_mode[0].file_mode = "100644".to_owned();
-        assert!(!build_input_dynamic_dependencies_resolve(&wrong_mode));
-        assert!(!build_input_dynamic_dependencies_resolve(&[build_entry(
-            "tool_dynamic_dependency",
-            "library.so",
-            "100644",
-        )]));
-        assert!(build_input_dynamic_dependencies_resolve(&[build_entry(
-            "tool_dynamic_dependency",
-            "tools/runtime/library.so",
-            "100644",
-        )]));
-
-        let mut high_cardinality = Vec::with_capacity(PAIR_COUNT * 2);
-        for ordinal in 0..PAIR_COUNT {
-            high_cardinality.push(build_entry(
-                "executable_path_input",
-                &format!("tools/linker/p{ordinal:04}/tool"),
-                "100755",
-            ));
-            high_cardinality.push(build_entry(
-                "tool_dynamic_dependency",
-                &format!("tools/linker/p{ordinal:04}/library.so"),
-                "100644",
-            ));
-        }
-        let executable_parents = build_input_executable_parent_directories(&high_cardinality);
-        assert_eq!(executable_parents.len(), PAIR_COUNT);
-        let mut lookups = 0_usize;
-        assert!(build_input_dynamic_dependencies_resolve_with(
-            &high_cardinality,
-            |parent| {
-                lookups += 1;
-                executable_parents.contains(parent)
-            },
-        ));
-        assert_eq!(lookups, PAIR_COUNT);
-    }
-
-    #[test]
-    fn streamed_build_archive_is_exact_and_bounded() {
-        let member = b"retained member";
-        let member_fingerprint = fingerprint(member).expect("member fingerprint");
-        let inventory = BuildInputInventory {
-            schema: "fixture".to_owned(),
-            campaign_id: "fixture".to_owned(),
-            target_triple: "fixture".to_owned(),
-            entry_count: 1,
-            total_byte_length: member_fingerprint.byte_length,
-            archive_fingerprint: ArtifactFingerprint {
-                sha256: "AA".repeat(32),
-                byte_length: 0,
-            },
-            executable_path_directories: Vec::new(),
-            entries: vec![BuildInputEntry {
-                role: "fixture".to_owned(),
-                relative_path: "fixture".to_owned(),
-                file_mode: "100644".to_owned(),
-                fingerprint: member_fingerprint,
-            }],
-        };
-        let mut archive = FIXED_BUILD_INPUT_ARCHIVE_MAGIC.to_vec();
-        archive.extend_from_slice(
-            &u64::try_from(member.len())
-                .expect("member length")
-                .to_be_bytes(),
-        );
-        archive.extend_from_slice(member);
-        assert_eq!(
-            validate_build_input_archive_stream(&mut std::io::Cursor::new(&archive), &inventory)
-                .expect("valid archive"),
-            fingerprint(&archive).expect("archive fingerprint"),
-        );
-        archive.push(0);
-        assert!(validate_build_input_archive_stream(
-            &mut std::io::Cursor::new(&archive),
-            &inventory,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn segment_prefix_mutations_fail_closed_with_sanitized_errors() {
-        const CAMPAIGN: &str = "018f4f9a-3f5b-4ae8-8a37-11c9fc12d001";
-        const OTHER: &str = "018f4f9a-3f5b-4ae8-8a37-11c9fc12d002";
-        const GENESIS: &str = "marty.performance/sd-jwt-issuance-validity-genesis/v1";
-        const CONTINUATION: &str = "marty.performance/sd-jwt-issuance-validity-continuation/v1";
-        const SAMPLE: &str = "marty.performance/sd-jwt-issuance-validity-sample/v1";
-        let line = |schema: &str,
-                    campaign: &str,
-                    segment: u32,
-                    record: u32,
-                    utc: &str,
-                    monotonic: u64| {
-            format!(
-                "{{\"schema\":\"{schema}\",\"campaign_id\":\"{campaign}\",\"segment_ordinal\":{segment},\"record_ordinal\":{record},\"utc_rfc3339_nanoseconds\":\"{utc}\",\"monotonic_nanoseconds\":{monotonic}}}\n"
-            )
-            .into_bytes()
-        };
-        let utc = "2026-08-29T12:35:00.000000000Z";
-        let header = line(GENESIS, CAMPAIGN, 0, 0, utc, 1);
+    fn report_is_deterministic_create_new_outside_campaign_and_nonactivating() {
+        assert!(valid_analysis_output_file_name(std::ffi::OsStr::new(
+            "analysis.json"
+        )));
+        assert!(valid_analysis_output_file_name(std::ffi::OsStr::new(
+            "analysis.v1.json"
+        )));
         for invalid in [
-            line("unknown-schema", CAMPAIGN, 0, 1, utc, 2),
-            line(SAMPLE, CAMPAIGN, 0, 2, utc, 2),
-            line(SAMPLE, CAMPAIGN, 0, 0, utc, 2),
-            line(SAMPLE, OTHER, 0, 1, utc, 2),
-            line(SAMPLE, CAMPAIGN, 1, 1, utc, 2),
-            line(SAMPLE, CAMPAIGN, 0, 1, "2026-08-29t12:35:00.000000000Z", 2),
-            line(GENESIS, CAMPAIGN, 0, 1, utc, 2),
+            "",
+            ".",
+            "..",
+            "analysis.",
+            "analysis.json:stream",
+            "NUL.json",
+            "con",
+            "COM1.txt",
         ] {
-            let mut state = SegmentPrefixState::default();
-            state.observe(&header, "prefix corpus").expect("header");
-            let error = state
-                .observe(&invalid, "prefix corpus")
-                .expect_err("mutation must reject")
-                .to_string();
-            assert_eq!(error, "analysis rejected: prefix corpus");
-            assert!(!error.contains(CAMPAIGN));
+            assert!(!valid_analysis_output_file_name(std::ffi::OsStr::new(
+                invalid
+            )));
         }
-        for invalid in [
-            line(CONTINUATION, CAMPAIGN, 0, 0, utc, 1),
-            line(GENESIS, CAMPAIGN, 1, 0, utc, 1),
-        ] {
-            assert!(SegmentPrefixState::default()
-                .observe(&invalid, "prefix corpus")
-                .is_err());
-        }
-    }
-
-    #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one focused regression binds segment chronology, counters, and duration edges"
-    )]
-    fn streamed_segment_binds_chronology_counts_and_duration_bounds() {
-        assert!(monotonic_duration_within_seconds(
-            1,
-            1 + 43_200_000_000_000,
-            43_200,
-        ));
-        assert!(!monotonic_duration_within_seconds(
-            1,
-            2 + 43_200_000_000_000,
-            43_200,
-        ));
-        assert!(monotonic_duration_within_seconds(
-            9,
-            9 + 604_800_000_000_000,
-            604_800,
-        ));
-        assert!(!monotonic_duration_within_seconds(
-            9,
-            10 + 604_800_000_000_000,
-            604_800,
-        ));
-        assert!(!monotonic_duration_within_seconds(2, 1, 43_200));
 
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let path = temporary.path().join("segment.ndjson");
-        let record = |schema: &str, ordinal: u32, monotonic: u64| {
-            format!(
-                "{{\"schema\":\"{schema}\",\"campaign_id\":\"018f4f9a-3f5b-4ae8-8a37-11c9fc12d001\",\"segment_ordinal\":0,\"record_ordinal\":{ordinal},\"utc_rfc3339_nanoseconds\":\"2026-08-29T12:35:00.000000000Z\",\"monotonic_nanoseconds\":{monotonic}}}\n"
-            )
-            .into_bytes()
-        };
-        let schemas = [
-            "marty.performance/sd-jwt-issuance-validity-genesis/v1",
-            "marty.performance/sd-jwt-issuance-validity-sample/v1",
-            "marty.performance/sd-jwt-issuance-validity-process-intent/v1",
-            "marty.performance/sd-jwt-issuance-validity-process-start/v1",
-            "marty.performance/sd-jwt-issuance-validity-process-finish/v1",
-            "marty.performance/sd-jwt-issuance-validity-attestation-transition/v1",
-        ];
-        let mut segment = Vec::new();
-        for (ordinal, schema) in schemas.into_iter().enumerate() {
-            segment.extend_from_slice(&record(
-                schema,
-                u32::try_from(ordinal).expect("ordinal"),
-                u64::try_from(ordinal + 1).expect("monotonic"),
-            ));
-        }
-        let prefix = fingerprint(&segment).expect("prefix fingerprint");
-        let footer = SegmentFooterWire {
-            schema: "marty.performance/sd-jwt-issuance-validity-segment-footer/v1".to_owned(),
+        let output = temporary.path().join("analysis.json");
+        let report = IssuanceAnalysisReport {
+            schema: "marty.performance/sd-jwt-issuance-analysis/v1",
+            analysis_scope: "offline_artifact_integrity_subset_v1",
             campaign_id: "018f4f9a-3f5b-4ae8-8a37-11c9fc12d001".to_owned(),
-            segment_ordinal: 0,
-            record_ordinal: 6,
-            utc_rfc3339_nanoseconds: "2026-08-29T12:35:00.000000000Z".to_owned(),
-            monotonic_nanoseconds: 7,
-            records_before_footer: 6,
-            bytes_before_footer: prefix.byte_length,
-            records_before_footer_fingerprint: prefix,
-            first_monotonic_nanoseconds: 1,
-            last_monotonic_nanoseconds: 7,
-            sample_count: 1,
-            process_intent_count: 1,
-            process_start_count: 1,
-            process_finish_count: 1,
-            attestation_transition_count: 1,
-            closed_reason: "campaign_complete".to_owned(),
+            manifest: test_fingerprint(1),
+            plan: test_fingerprint(2),
+            selected_route_benchmark_id: "sd_jwt_issuance/fixture".to_owned(),
+            selected_route_artifact: test_fingerprint(3),
+            source_archive: test_fingerprint(4),
+            cargo_lock: test_fingerprint(5),
+            hardware_profile: test_fingerprint(14),
+            build_receipt: test_fingerprint(6),
+            build_input_inventory: test_fingerprint(7),
+            build_input_archive: test_fingerprint(8),
+            fixed_binary: test_fingerprint(9),
+            terminal_observation_receipt: test_fingerprint(10),
+            terminal_observation_evidence: test_fingerprint(11),
+            completion: test_fingerprint(12),
+            completion_anchor: test_fingerprint(13),
+            checks: vec!["artifact_integrity"],
+            artifact_integrity_status: "valid",
+            campaign_qualification_status: "not_evaluated",
+            production_threshold_activation: false,
+            limitations: vec!["no_performance_or_threshold_claim"],
         };
-        let mut footer_line = serde_json::to_vec(&footer).expect("footer JSON");
-        footer_line.push(b'\n');
-        segment.extend_from_slice(&footer_line);
-        fs::write(&path, segment).expect("write segment");
-        let input = open_absolute_file(&path, 64 * 1024 * 1024, None, "test segment")
-            .expect("open segment");
-        let inspection = inspect_segment(input, "test segment").expect("inspect segment");
-        assert!(validate_terminal_footer(
-            &footer,
-            &inspection,
-            &footer.campaign_id,
-            0,
-            7,
-            43_200,
-        ));
-        let mut invalid = footer.clone();
-        invalid.sample_count += 1;
-        assert!(!validate_terminal_footer(
-            &invalid,
-            &inspection,
-            &footer.campaign_id,
-            0,
-            7,
-            43_200,
+
+        write_analysis_report(&output, None, &report).expect("write report");
+        let first = fs::read(&output).expect("report bytes");
+        assert_eq!(
+            canonical_pretty_bytes(&report).expect("canonical report"),
+            first
+        );
+        let encoded = String::from_utf8(first.clone()).expect("report UTF-8");
+        assert!(encoded.contains("\"campaign_qualification_status\": \"not_evaluated\""));
+        assert!(encoded.contains("\"production_threshold_activation\": false"));
+        assert!(write_analysis_report(&output, None, &report).is_err());
+        assert_eq!(fs::read(&output).expect("preserved report"), first);
+
+        let campaign_path = temporary.path().join("campaign");
+        fs::create_dir(&campaign_path).expect("campaign directory");
+        let campaign = CampaignDirectory::open(&campaign_path).expect("open campaign");
+        let contaminated = campaign_path.join("analysis.json");
+        assert!(write_analysis_report(&contaminated, Some(campaign.identity), &report).is_err());
+        assert!(!contaminated.exists());
+    }
+
+    #[test]
+    fn test_only_validator_entry_points_remain_bounded() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let bounded = temporary.path().join("bounded.bin");
+        fs::write(&bounded, b"bounded").expect("bounded input");
+        assert_eq!(
+            read_bounded(&bounded, 7, "bounded input").expect("bounded read"),
+            b"bounded"
+        );
+        assert!(read_bounded(&bounded, 6, "bounded input").is_err());
+
+        let key = SigningKey::from_bytes(&[0x42; 32]);
+        assert!(!terminal_receipt_set_has_no_conflict(
+            &[b"{}\n".as_slice()],
+            &key.verifying_key(),
         ));
 
-        let decreasing = temporary.path().join("decreasing.ndjson");
-        let mut bytes = record(
-            "marty.performance/sd-jwt-issuance-validity-genesis/v1",
-            0,
-            2,
-        );
-        bytes.extend_from_slice(&record(
-            "marty.performance/sd-jwt-issuance-validity-sample/v1",
-            1,
-            1,
+        let empty = fingerprint(b"").expect("empty fingerprint");
+        let inventory = BuildInputInventory {
+            schema: String::new(),
+            campaign_id: String::new(),
+            target_triple: String::new(),
+            entry_count: 0,
+            total_byte_length: 0,
+            archive_fingerprint: empty.clone(),
+            executable_path_directories: Vec::new(),
+            entries: Vec::new(),
+        };
+        assert!(!valid_build_input_archive_bytes(
+            b"", &inventory, &empty, &empty, false, "", "",
         ));
-        bytes.extend_from_slice(&footer_line);
-        fs::write(&decreasing, bytes).expect("write decreasing segment");
-        let input = open_absolute_file(&decreasing, 64 * 1024 * 1024, None, "decreasing segment")
-            .expect("open decreasing segment");
-        assert!(inspect_segment(input, "decreasing segment").is_err());
     }
 }

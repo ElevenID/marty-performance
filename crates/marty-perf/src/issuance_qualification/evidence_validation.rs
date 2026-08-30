@@ -133,7 +133,7 @@ fn validate_index_entry(
             && entry.relative_path
                 == process.relative_path(match kind {
                     ArtifactKind::Route => ArtifactRole::Route,
-                    ArtifactKind::Criterion => ArtifactRole::Criterion,
+                    ArtifactKind::Criterion => ArtifactRole::CriterionEstimate,
                 })?
             && &entry.fingerprint == bound,
         "evidence rejected: index binding"
@@ -366,7 +366,9 @@ mod tests {
                 expansion_position: process.coordinate.expansion,
                 timing_process_id: process.timing_process_id.clone(),
                 full_benchmark_id: process.full_benchmark_id.to_owned(),
-                relative_path: process.relative_path(ArtifactRole::Criterion).unwrap(),
+                relative_path: process
+                    .relative_path(ArtifactRole::CriterionEstimate)
+                    .unwrap(),
                 fingerprint: bound.clone(),
             })
             .collect::<Vec<_>>();

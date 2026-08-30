@@ -1,7 +1,7 @@
 //! Validated, canonical process schedule and artifact roles for qualification.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use marty_perf_schema::{SdJwtIssuanceQualificationManifest, SdJwtIssuanceQualificationPlan};
@@ -53,9 +53,44 @@ pub(super) struct ProcessCoordinate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "typed producer roles are consumed incrementally by nonactivating controller slices"
+)]
 pub(super) enum ArtifactRole {
+    Invocation,
+    CriterionHome,
+    TemporaryDirectory,
+    BarrierToken,
+    BarrierReady,
+    BarrierRelease,
+    BarrierReceipt,
+    InitialInventory,
+    FinalInventory,
     Route,
-    Criterion,
+    CriterionEstimate,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct ArtifactPath(PathBuf);
+
+impl ArtifactPath {
+    pub(super) fn canonical(value: String) -> Result<Self> {
+        anyhow::ensure!(
+            !value.is_empty()
+                && !value.contains('\\')
+                && !value.contains("//")
+                && Path::new(&value)
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "qualification schedule produced an invalid artifact path"
+        );
+        Ok(Self(PathBuf::from(value)))
+    }
+
+    pub(super) fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,25 +104,53 @@ pub(super) struct ScheduledProcess<'a> {
 }
 
 impl ScheduledProcess<'_> {
-    pub(super) fn relative_path(&self, role: ArtifactRole) -> Result<String> {
+    pub(super) fn artifact_path(&self, role: ArtifactRole) -> Result<ArtifactPath> {
         let coordinate = self.coordinate;
+        let stem = format!(
+            "r{:02}_c{:02}_e{}",
+            coordinate.global_round, coordinate.cell, coordinate.expansion
+        );
         match role {
-            ArtifactRole::Route => Ok(format!(
-                "routes/r{:02}_c{:02}_e{}.ndjson",
-                coordinate.global_round, coordinate.cell, coordinate.expansion
-            )),
-            ArtifactRole::Criterion => {
+            ArtifactRole::Invocation => ArtifactPath::canonical(format!("invocations/{stem}.json")),
+            ArtifactRole::CriterionHome => ArtifactPath::canonical(format!("criterion/{stem}")),
+            ArtifactRole::TemporaryDirectory => ArtifactPath::canonical(format!("tmp/{stem}")),
+            ArtifactRole::BarrierToken => ArtifactPath::canonical(format!("barriers/{stem}.token")),
+            ArtifactRole::BarrierReady => {
+                ArtifactPath::canonical(format!("barrier-ready/{stem}.json"))
+            }
+            ArtifactRole::BarrierRelease => {
+                ArtifactPath::canonical(format!("barrier-releases/{stem}.json"))
+            }
+            ArtifactRole::BarrierReceipt => {
+                ArtifactPath::canonical(format!("barrier-receipts/{stem}.json"))
+            }
+            ArtifactRole::InitialInventory => {
+                ArtifactPath::canonical(format!("inventories/{stem}-initial.json"))
+            }
+            ArtifactRole::FinalInventory => {
+                ArtifactPath::canonical(format!("inventories/{stem}-final.json"))
+            }
+            ArtifactRole::Route => ArtifactPath::canonical(format!("routes/{stem}.ndjson")),
+            ArtifactRole::CriterionEstimate => {
                 let function_id = self
                     .full_benchmark_id
                     .strip_prefix("sd_jwt_issuance/")
                     .filter(|value| !value.is_empty())
                     .context("qualification schedule contains a noncanonical Criterion ID")?;
-                Ok(format!(
-                    "criterion/r{:02}_c{:02}_e{}/sd_jwt_issuance/{function_id}/new/estimates.json",
-                    coordinate.global_round, coordinate.cell, coordinate.expansion
+                ArtifactPath::canonical(format!(
+                    "criterion/{stem}/sd_jwt_issuance/{function_id}/new/estimates.json"
                 ))
             }
         }
+    }
+
+    pub(super) fn relative_path(&self, role: ArtifactRole) -> Result<String> {
+        self.artifact_path(role).map(|path| {
+            path.0
+                .into_os_string()
+                .into_string()
+                .expect("ASCII schedule path")
+        })
     }
 }
 
@@ -294,7 +357,7 @@ mod tests {
             "routes/r00_c00_e0.ndjson"
         );
         assert!(first
-            .relative_path(ArtifactRole::Criterion)
+            .relative_path(ArtifactRole::CriterionEstimate)
             .unwrap()
             .starts_with("criterion/r00_c00_e0/sd_jwt_issuance/"));
         let abba = schedule

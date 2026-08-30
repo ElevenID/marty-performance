@@ -30,6 +30,11 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, Variant, Version};
 
+#[allow(
+    dead_code,
+    reason = "the nonactivating artifact store is consumed by the next controller slice"
+)]
+mod artifact_store;
 mod evidence_validation;
 mod schedule;
 mod statistics;

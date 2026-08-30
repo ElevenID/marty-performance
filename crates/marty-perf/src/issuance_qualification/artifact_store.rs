@@ -51,7 +51,44 @@ pub(super) struct CampaignArtifactStore {
     identity: FileIdentity,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum FixedArtifactRole {
+    FirstQuietAttestation,
+    BaselineUnrelatedProcessSet,
+    HardwareProfile,
+    ValidityThresholds,
+}
+
+impl FixedArtifactRole {
+    fn path(self) -> &'static str {
+        match self {
+            Self::FirstQuietAttestation => "attestations/first-quiet-window.json",
+            Self::BaselineUnrelatedProcessSet => "profiles/baseline-unrelated-process-set.json",
+            Self::HardwareProfile => "profiles/hardware.json",
+            Self::ValidityThresholds => "profiles/validity-thresholds.json",
+        }
+    }
+}
+
 impl CampaignArtifactStore {
+    pub(super) fn write_fixed_preimage(
+        &self,
+        role: FixedArtifactRole,
+        bytes: &[u8],
+        maximum: u64,
+    ) -> Result<ArtifactFingerprint> {
+        let path = ArtifactPath::canonical(role.path().into())?;
+        self.write_create_new_synced(&path, bytes, maximum)
+    }
+    pub(super) fn write_first_quiet_window<T: Serialize>(
+        &self,
+        value: &T,
+        maximum: u64,
+    ) -> Result<ArtifactFingerprint> {
+        let path = ArtifactPath::canonical("first-quiet-window.json".into())?;
+        self.write_canonical_pretty_create_new(&path, value, maximum)
+    }
+
     pub(super) fn create_new(absolute_root: &Path) -> Result<Self> {
         anyhow::ensure!(
             absolute_root.is_absolute(),

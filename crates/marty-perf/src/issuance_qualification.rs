@@ -36,6 +36,11 @@ use uuid::{Uuid, Variant, Version};
 )]
 mod artifact_store;
 mod evidence_validation;
+#[allow(
+    dead_code,
+    reason = "the side-effect-free quiet-window kernel is controller plumbing and remains nonactivating"
+)]
+mod first_quiet_window;
 mod schedule;
 mod statistics;
 

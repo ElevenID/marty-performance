@@ -30,6 +30,9 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, Variant, Version};
 
+#[cfg(test)]
+mod statistics;
+
 const MANIFEST_SCHEMA: &str = "sd_jwt_issuance_qualification_manifest_v1";
 const PLAN_SCHEMA: &str = "marty.performance/sd-jwt-issuance-plan/v3";
 const BENCHMARK_GROUP_ID: &str = "sd_jwt_issuance";

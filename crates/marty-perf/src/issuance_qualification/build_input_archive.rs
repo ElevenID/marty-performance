@@ -6,14 +6,190 @@ use anyhow::{Context, Result};
 use marty_perf_schema::ArtifactFingerprint;
 use sha2::{Digest, Sha256};
 
-use super::artifact_store::{CampaignArtifactStore, PersistedBuildInputArchiveBytes};
+use super::artifact_store::{
+    CampaignArtifactStore, PersistedBuildInputArchiveBytes, PersistedBuildInputInventoryBytes,
+};
 use super::{
-    ensure_file_unchanged, valid_artifact_fingerprint, OpenedInput,
-    FIXED_BUILD_INPUT_ARCHIVE_MAGIC, MAX_FIXED_BUILD_INPUT_BYTES, MAX_FIXED_BUILD_INPUT_ENTRIES,
+    canonical_pretty_bytes, concrete_target_linker_environment_name, ensure_file_unchanged,
+    fingerprint, valid_artifact_fingerprint, valid_build_input_inventory, valid_campaign_id,
+    BuildInputEntry, BuildInputInventory, OpenedInput, FIXED_BUILD_INPUT_ARCHIVE_MAGIC,
+    MAX_FIXED_BUILD_INPUT_BYTES, MAX_FIXED_BUILD_INPUT_ENTRIES, MAX_SOURCE_ARCHIVE_V1_BYTES,
 };
 
 const MEMBER_BUFFER_BYTES: usize = 8 * 1024;
 const MEMBER_BUFFER_BYTES_U64: u64 = 8 * 1024;
+
+/// Closed roles for caller-approved public build inputs.
+///
+/// Cargo configuration is intentionally absent. A clean generated configuration must use the
+/// separate `bind_generated_cargo_configuration` constructor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PublicBuildInputRole {
+    CargoDependencySource,
+    CargoExecutable,
+    ExecutablePathInput,
+    RustcExecutable,
+    RustcSysrootFile,
+    TargetArchiverExecutable,
+    TargetLinkerExecutable,
+    ToolDynamicDependency,
+    WindowsRuntimeInput,
+}
+
+impl PublicBuildInputRole {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::CargoDependencySource => "cargo_dependency_source",
+            Self::CargoExecutable => "cargo_executable",
+            Self::ExecutablePathInput => "executable_path_input",
+            Self::RustcExecutable => "rustc_executable",
+            Self::RustcSysrootFile => "rustc_sysroot_file",
+            Self::TargetArchiverExecutable => "target_archiver_executable",
+            Self::TargetLinkerExecutable => "target_linker_executable",
+            Self::ToolDynamicDependency => "tool_dynamic_dependency",
+            Self::WindowsRuntimeInput => "windows_runtime_input",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApprovedPublicBuildInputRole {
+    GeneratedCargoConfiguration,
+    Public(PublicBuildInputRole),
+}
+
+impl ApprovedPublicBuildInputRole {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::GeneratedCargoConfiguration => "cargo_configuration",
+            Self::Public(role) => role.wire_name(),
+        }
+    }
+}
+
+/// Portable logical mode retained by the inventory rather than a host ACL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LogicalBuildInputMode {
+    Data,
+    Executable,
+}
+
+impl LogicalBuildInputMode {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Data => "100644",
+            Self::Executable => "100755",
+        }
+    }
+}
+
+/// Explicit caller approval for one public, already-open build input handle.
+pub(super) struct ApprovedPublicBuildInput {
+    role: ApprovedPublicBuildInputRole,
+    relative_path: String,
+    mode: LogicalBuildInputMode,
+    input: OpenedInput,
+}
+
+impl ApprovedPublicBuildInput {
+    /// Binds one non-configuration public input without reopening or discovering its path.
+    pub(super) fn bind(
+        role: PublicBuildInputRole,
+        relative_path: String,
+        mode: LogicalBuildInputMode,
+        input: OpenedInput,
+    ) -> Result<Self> {
+        Self::bind_role(
+            ApprovedPublicBuildInputRole::Public(role),
+            relative_path,
+            mode,
+            input,
+        )
+    }
+
+    /// Binds one explicitly generated, staged, clean public Cargo configuration.
+    ///
+    /// This is a provenance assertion by the trusted caller, not a heuristic secret scan. Live
+    /// Cargo configuration and credentials have no generic role or constructor.
+    pub(super) fn bind_generated_cargo_configuration(
+        relative_path: String,
+        input: OpenedInput,
+    ) -> Result<Self> {
+        Self::bind_role(
+            ApprovedPublicBuildInputRole::GeneratedCargoConfiguration,
+            relative_path,
+            LogicalBuildInputMode::Data,
+            input,
+        )
+    }
+
+    fn bind_role(
+        role: ApprovedPublicBuildInputRole,
+        relative_path: String,
+        mode: LogicalBuildInputMode,
+        input: OpenedInput,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            input.snapshot.readonly && input.snapshot.link_count == 1,
+            "fixed build input capture rejected"
+        );
+        ensure_file_unchanged(&input.file, input.snapshot, "build-input archive member")?;
+        Ok(Self {
+            role,
+            relative_path,
+            mode,
+            input,
+        })
+    }
+
+    fn ensure_unchanged(&self) -> Result<()> {
+        ensure_file_unchanged(
+            &self.input.file,
+            self.input.snapshot,
+            "build-input archive member",
+        )
+    }
+}
+
+/// Joint persistence proof for one canonical inventory and its matching framed archive.
+pub(super) struct PersistedFixedBuildInputs {
+    inventory: PersistedBuildInputInventoryBytes,
+    archive: PersistedBuildInputArchiveBytes,
+}
+
+impl PersistedFixedBuildInputs {
+    /// Returns the retained canonical inventory fingerprint.
+    pub(super) fn inventory_fingerprint(&self) -> &ArtifactFingerprint {
+        self.inventory.fingerprint()
+    }
+
+    /// Returns the retained framed archive fingerprint.
+    pub(super) fn archive_fingerprint(&self) -> &ArtifactFingerprint {
+        self.archive.fingerprint()
+    }
+}
+
+struct PreparedFixedBuildInputs {
+    inventory_bytes: Vec<u8>,
+    inventory_fingerprint: ArtifactFingerprint,
+    archive_fingerprint: ArtifactFingerprint,
+    members: Vec<BuildInputArchiveMember>,
+}
+
+struct DigestWriter<'a> {
+    hasher: &'a mut Sha256,
+}
+
+impl Write for DigestWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// One already-open, immutable archive member bound to its expected inventory fingerprint.
 pub(super) struct BuildInputArchiveMember {
@@ -118,6 +294,230 @@ fn copy_and_hash_exact_member<R: Read + ?Sized, W: Write + ?Sized>(
     })
 }
 
+fn inventory_from_entries(
+    campaign_id: &str,
+    target_triple: &str,
+    entries: Vec<BuildInputEntry>,
+    archive_fingerprint: ArtifactFingerprint,
+) -> Result<BuildInputInventory> {
+    let entry_count = u32::try_from(entries.len()).context("fixed build input capture rejected")?;
+    let total_byte_length = entries.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.fingerprint.byte_length)
+            .context("fixed build input capture rejected")
+    })?;
+    Ok(BuildInputInventory {
+        schema: "marty.performance/sd-jwt-issuance-fixed-build-input-inventory/v2".to_owned(),
+        campaign_id: campaign_id.to_owned(),
+        target_triple: target_triple.to_owned(),
+        entry_count,
+        total_byte_length,
+        archive_fingerprint,
+        executable_path_directories: [
+            "toolchain/bin",
+            "tools/linker",
+            "tools/archiver",
+            "tools/runtime",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        entries,
+    })
+}
+
+fn projected_inventory_for_inputs(
+    campaign_id: &str,
+    target_triple: &str,
+    inputs: &[ApprovedPublicBuildInput],
+) -> Result<BuildInputInventory> {
+    let member_count = u64::try_from(inputs.len()).context("fixed build input capture rejected")?;
+    let total_member_bytes = inputs.iter().try_fold(0_u64, |total, input| {
+        total
+            .checked_add(input.input.snapshot.byte_length)
+            .context("fixed build input capture rejected")
+    })?;
+    let archive_length = checked_archive_length(member_count, total_member_bytes)
+        .context("fixed build input capture rejected")?;
+    let placeholder = "0".repeat(64);
+    let entries = inputs
+        .iter()
+        .map(|input| BuildInputEntry {
+            role: input.role.wire_name().to_owned(),
+            relative_path: input.relative_path.clone(),
+            file_mode: input.mode.wire_name().to_owned(),
+            fingerprint: ArtifactFingerprint {
+                sha256: placeholder.clone(),
+                byte_length: input.input.snapshot.byte_length,
+            },
+        })
+        .collect::<Vec<_>>();
+    inventory_from_entries(
+        campaign_id,
+        target_triple,
+        entries,
+        ArtifactFingerprint {
+            sha256: placeholder,
+            byte_length: archive_length,
+        },
+    )
+}
+
+fn fingerprint_sorted_inputs(
+    inputs: &mut [ApprovedPublicBuildInput],
+    archive_length: u64,
+) -> Result<(Vec<BuildInputEntry>, ArtifactFingerprint)> {
+    let mut archive_hasher = Sha256::new();
+    archive_hasher.update(FIXED_BUILD_INPUT_ARCHIVE_MAGIC);
+    let mut entries = Vec::with_capacity(inputs.len());
+    for input in &mut *inputs {
+        input.ensure_unchanged()?;
+        input
+            .input
+            .file
+            .seek(SeekFrom::Start(0))
+            .context("fixed build input capture rejected")?;
+        archive_hasher.update(input.input.snapshot.byte_length.to_be_bytes());
+        let member_fingerprint = {
+            let mut archive_writer = DigestWriter {
+                hasher: &mut archive_hasher,
+            };
+            copy_and_hash_exact_member(
+                &mut input.input.file,
+                &mut archive_writer,
+                input.input.snapshot.byte_length,
+            )?
+        };
+        input.ensure_unchanged()?;
+        entries.push(BuildInputEntry {
+            role: input.role.wire_name().to_owned(),
+            relative_path: input.relative_path.clone(),
+            file_mode: input.mode.wire_name().to_owned(),
+            fingerprint: member_fingerprint,
+        });
+    }
+    for input in &*inputs {
+        input.ensure_unchanged()?;
+    }
+    Ok((
+        entries,
+        ArtifactFingerprint {
+            sha256: hex::encode_upper(archive_hasher.finalize()),
+            byte_length: archive_length,
+        },
+    ))
+}
+
+fn prepare_fixed_build_inputs(
+    campaign_id: &str,
+    target_triple: &str,
+    windows: bool,
+    mut inputs: Vec<ApprovedPublicBuildInput>,
+) -> Result<PreparedFixedBuildInputs> {
+    anyhow::ensure!(
+        valid_campaign_id(campaign_id)
+            && concrete_target_linker_environment_name(target_triple).is_some()
+            && target_triple
+                .split('-')
+                .any(|component| component == "windows")
+                == windows,
+        "fixed build input capture rejected"
+    );
+    inputs.sort_by(|left, right| {
+        (
+            left.role.wire_name().as_bytes(),
+            left.relative_path.as_bytes(),
+        )
+            .cmp(&(
+                right.role.wire_name().as_bytes(),
+                right.relative_path.as_bytes(),
+            ))
+    });
+    for input in &inputs {
+        input.ensure_unchanged()?;
+    }
+    let projected_inventory = projected_inventory_for_inputs(campaign_id, target_triple, &inputs)?;
+    anyhow::ensure!(
+        valid_build_input_inventory(&projected_inventory, windows, target_triple, campaign_id,),
+        "fixed build input capture rejected"
+    );
+
+    let (entries, archive_fingerprint) = fingerprint_sorted_inputs(
+        &mut inputs,
+        projected_inventory.archive_fingerprint.byte_length,
+    )?;
+    let inventory = inventory_from_entries(
+        campaign_id,
+        target_triple,
+        entries,
+        archive_fingerprint.clone(),
+    )?;
+    anyhow::ensure!(
+        valid_build_input_inventory(&inventory, windows, target_triple, campaign_id),
+        "fixed build input capture rejected"
+    );
+    let inventory_bytes =
+        canonical_pretty_bytes(&inventory).context("fixed build input capture rejected")?;
+    anyhow::ensure!(
+        u64::try_from(inventory_bytes.len())
+            .is_ok_and(|length| { length <= MAX_SOURCE_ARCHIVE_V1_BYTES }),
+        "fixed build input capture rejected"
+    );
+    let inventory_fingerprint =
+        fingerprint(&inventory_bytes).context("fixed build input capture rejected")?;
+    let fingerprints = inventory
+        .entries
+        .iter()
+        .map(|entry| entry.fingerprint.clone())
+        .collect::<Vec<_>>();
+    let members = inputs
+        .into_iter()
+        .zip(fingerprints)
+        .map(|(input, expected)| BuildInputArchiveMember::bind(input.input, expected))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PreparedFixedBuildInputs {
+        inventory_bytes,
+        inventory_fingerprint,
+        archive_fingerprint,
+        members,
+    })
+}
+
+fn persist_fixed_build_inputs(
+    store: &CampaignArtifactStore,
+    mut prepared: PreparedFixedBuildInputs,
+) -> Result<PersistedFixedBuildInputs> {
+    for member in &prepared.members {
+        member.ensure_unchanged()?;
+    }
+    let inventory = store.write_build_input_inventory(&prepared.inventory_bytes)?;
+    anyhow::ensure!(
+        inventory.fingerprint() == &prepared.inventory_fingerprint,
+        "fixed build input capture rejected"
+    );
+    for member in &prepared.members {
+        member.ensure_unchanged()?;
+    }
+    let archive = emit_build_input_archive(store, &mut prepared.members)?;
+    anyhow::ensure!(
+        archive.fingerprint() == &prepared.archive_fingerprint
+            && inventory.shares_store_with(&archive),
+        "fixed build input capture rejected"
+    );
+    Ok(PersistedFixedBuildInputs { inventory, archive })
+}
+
+/// Captures one explicit public handle allowlist as a canonical inventory and matching BIA.
+pub(super) fn capture_fixed_build_inventory(
+    store: &CampaignArtifactStore,
+    campaign_id: &str,
+    target_triple: &str,
+    windows: bool,
+    inputs: Vec<ApprovedPublicBuildInput>,
+) -> Result<PersistedFixedBuildInputs> {
+    let prepared = prepare_fixed_build_inputs(campaign_id, target_triple, windows, inputs)?;
+    persist_fixed_build_inputs(store, prepared)
+}
+
 /// Streams canonical archive framing and exact member bytes into the fixed create-only role.
 pub(super) fn emit_build_input_archive(
     store: &CampaignArtifactStore,
@@ -184,7 +584,7 @@ mod tests {
     use crate::issuance_qualification::artifact_store::CampaignArtifactStore;
     use crate::issuance_qualification::fingerprint;
     #[cfg(unix)]
-    use crate::issuance_qualification::open_absolute_file;
+    use crate::issuance_qualification::{open_absolute_file, validate_build_input_archive_stream};
 
     struct TrackingReader {
         bytes: io::Cursor<Vec<u8>>,
@@ -444,5 +844,334 @@ mod tests {
         .unwrap();
         let retry = emit_build_input_archive(&store, std::slice::from_mut(&mut correct));
         assert!(retry.is_err());
+    }
+
+    #[test]
+    fn public_role_domain_has_no_generic_or_live_cargo_configuration_role() {
+        let roles = [
+            PublicBuildInputRole::CargoDependencySource,
+            PublicBuildInputRole::CargoExecutable,
+            PublicBuildInputRole::ExecutablePathInput,
+            PublicBuildInputRole::RustcExecutable,
+            PublicBuildInputRole::RustcSysrootFile,
+            PublicBuildInputRole::TargetArchiverExecutable,
+            PublicBuildInputRole::TargetLinkerExecutable,
+            PublicBuildInputRole::ToolDynamicDependency,
+            PublicBuildInputRole::WindowsRuntimeInput,
+        ];
+        assert!(roles
+            .iter()
+            .all(|role| role.wire_name() != "cargo_configuration"));
+    }
+
+    #[cfg(unix)]
+    const CAMPAIGN_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
+    #[cfg(unix)]
+    const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+
+    #[cfg(unix)]
+    fn opened_public_input(
+        directory: &std::path::Path,
+        physical_name: &str,
+        bytes: &[u8],
+    ) -> OpenedInput {
+        let path = directory.join(physical_name);
+        fs::write(&path, bytes).unwrap();
+        set_readonly(&path, true);
+        open_absolute_file(
+            &path,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+            None,
+            "synthetic approved public build input",
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn approved_public_input(
+        directory: &std::path::Path,
+        physical_name: &str,
+        role: PublicBuildInputRole,
+        relative_path: &str,
+        mode: LogicalBuildInputMode,
+        bytes: &[u8],
+    ) -> ApprovedPublicBuildInput {
+        ApprovedPublicBuildInput::bind(
+            role,
+            relative_path.to_owned(),
+            mode,
+            opened_public_input(directory, physical_name, bytes),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn complete_public_inputs(directory: &std::path::Path) -> Vec<ApprovedPublicBuildInput> {
+        let mut inputs = vec![
+            ApprovedPublicBuildInput::bind_generated_cargo_configuration(
+                "cargo-home/config.toml".to_owned(),
+                opened_public_input(directory, "generated-config", b"[net]\noffline = true\n"),
+            )
+            .unwrap(),
+            approved_public_input(
+                directory,
+                "dependency-source",
+                PublicBuildInputRole::CargoDependencySource,
+                "cargo-home/registry/src/synthetic/lib.rs",
+                LogicalBuildInputMode::Data,
+                b"pub const SYNTHETIC: bool = true;\n",
+            ),
+            approved_public_input(
+                directory,
+                "cargo",
+                PublicBuildInputRole::CargoExecutable,
+                "toolchain/bin/cargo",
+                LogicalBuildInputMode::Executable,
+                b"synthetic cargo executable",
+            ),
+            approved_public_input(
+                directory,
+                "runtime-tool",
+                PublicBuildInputRole::ExecutablePathInput,
+                "tools/runtime/synthetic-runner",
+                LogicalBuildInputMode::Executable,
+                b"synthetic runtime executable",
+            ),
+            approved_public_input(
+                directory,
+                "rustc",
+                PublicBuildInputRole::RustcExecutable,
+                "toolchain/bin/rustc",
+                LogicalBuildInputMode::Executable,
+                b"synthetic rustc executable",
+            ),
+            approved_public_input(
+                directory,
+                "sysroot",
+                PublicBuildInputRole::RustcSysrootFile,
+                "toolchain/lib/libsynthetic.rlib",
+                LogicalBuildInputMode::Data,
+                b"synthetic sysroot member",
+            ),
+            approved_public_input(
+                directory,
+                "archiver",
+                PublicBuildInputRole::TargetArchiverExecutable,
+                "tools/archiver/ar",
+                LogicalBuildInputMode::Executable,
+                b"synthetic archiver executable",
+            ),
+            approved_public_input(
+                directory,
+                "linker",
+                PublicBuildInputRole::TargetLinkerExecutable,
+                "tools/linker/ld",
+                LogicalBuildInputMode::Executable,
+                b"synthetic linker executable",
+            ),
+            approved_public_input(
+                directory,
+                "runtime-library",
+                PublicBuildInputRole::ToolDynamicDependency,
+                "tools/runtime/libsynthetic.so",
+                LogicalBuildInputMode::Data,
+                b"synthetic runtime library",
+            ),
+        ];
+        inputs.reverse();
+        inputs
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn explicit_allowlist_is_canonical_and_ignores_unlisted_files() {
+        let (temporary, store) = store();
+        let inputs_root = tempfile::tempdir().unwrap();
+        fs::write(
+            inputs_root.path().join("unlisted-credential-token"),
+            b"synthetic unlisted secret sentinel",
+        )
+        .unwrap();
+        let inputs = complete_public_inputs(inputs_root.path());
+
+        let captured =
+            capture_fixed_build_inventory(&store, CAMPAIGN_ID, TARGET_TRIPLE, false, inputs)
+                .unwrap();
+        let inventory_bytes =
+            fs::read(temporary.path().join("campaign/build/input-inventory.json")).unwrap();
+        let archive_bytes =
+            fs::read(temporary.path().join("campaign/build/input-files.bia")).unwrap();
+        let inventory: BuildInputInventory = serde_json::from_slice(&inventory_bytes).unwrap();
+        assert!(valid_build_input_inventory(
+            &inventory,
+            false,
+            TARGET_TRIPLE,
+            CAMPAIGN_ID,
+        ));
+        assert_eq!(
+            inventory
+                .entries
+                .iter()
+                .map(|entry| entry.role.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "cargo_configuration",
+                "cargo_dependency_source",
+                "cargo_executable",
+                "executable_path_input",
+                "rustc_executable",
+                "rustc_sysroot_file",
+                "target_archiver_executable",
+                "target_linker_executable",
+                "tool_dynamic_dependency",
+            ]
+        );
+        assert_eq!(canonical_pretty_bytes(&inventory).unwrap(), inventory_bytes);
+        assert_eq!(
+            captured.inventory_fingerprint(),
+            &fingerprint(&inventory_bytes).unwrap()
+        );
+        assert_eq!(
+            captured.archive_fingerprint(),
+            &fingerprint(&archive_bytes).unwrap()
+        );
+        assert!(validate_build_input_archive_stream(
+            &mut io::Cursor::new(&archive_bytes),
+            &inventory,
+        )
+        .is_ok());
+        assert!(!archive_bytes
+            .windows(b"synthetic unlisted secret sentinel".len())
+            .any(|window| window == b"synthetic unlisted secret sentinel"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn paths_aliases_duplicates_modes_and_live_cargo_config_fail_before_persistence() {
+        enum Fault {
+            Parent,
+            Duplicate,
+            CaseAlias,
+            Mode,
+            LiveCargoConfig,
+        }
+
+        for fault in [
+            Fault::Parent,
+            Fault::Duplicate,
+            Fault::CaseAlias,
+            Fault::Mode,
+            Fault::LiveCargoConfig,
+        ] {
+            let (temporary, store) = store();
+            let inputs_root = tempfile::tempdir().unwrap();
+            let mut inputs = complete_public_inputs(inputs_root.path());
+            match fault {
+                Fault::Parent => inputs[0].relative_path = "../escape".to_owned(),
+                Fault::Duplicate => inputs[0].relative_path = inputs[1].relative_path.clone(),
+                Fault::CaseAlias => {
+                    let alias = approved_public_input(
+                        inputs_root.path(),
+                        "case-alias",
+                        PublicBuildInputRole::RustcSysrootFile,
+                        "TOOLCHAIN/lib/libsynthetic.rlib",
+                        LogicalBuildInputMode::Data,
+                        b"synthetic alias",
+                    );
+                    inputs.push(alias);
+                }
+                Fault::Mode => {
+                    inputs
+                        .iter_mut()
+                        .find(|input| input.role.wire_name() == "cargo_executable")
+                        .unwrap()
+                        .mode = LogicalBuildInputMode::Data;
+                }
+                Fault::LiveCargoConfig => {
+                    let configuration = inputs
+                        .iter_mut()
+                        .find(|input| input.role.wire_name() == "cargo_configuration")
+                        .unwrap();
+                    configuration.relative_path = "cargo-home/credentials.toml".to_owned();
+                }
+            }
+            let result =
+                capture_fixed_build_inventory(&store, CAMPAIGN_ID, TARGET_TRIPLE, false, inputs);
+            assert!(result.is_err());
+            assert!(!temporary
+                .path()
+                .join("campaign/build/input-inventory.json")
+                .exists());
+            assert!(!temporary
+                .path()
+                .join("campaign/build/input-files.bia")
+                .exists());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn snapshot_fingerprint_and_partial_faults_issue_no_combined_capability() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (temporary, store) = store();
+        let inputs_root = tempfile::tempdir().unwrap();
+        let inputs = complete_public_inputs(inputs_root.path());
+        let prepared =
+            prepare_fixed_build_inputs(CAMPAIGN_ID, TARGET_TRIPLE, false, inputs).unwrap();
+        let mut permissions = prepared.members[0]
+            .input
+            .file
+            .metadata()
+            .unwrap()
+            .permissions();
+        permissions.set_mode(permissions.mode() | 0o200);
+        prepared.members[0]
+            .input
+            .file
+            .set_permissions(permissions)
+            .unwrap();
+        assert!(persist_fixed_build_inputs(&store, prepared).is_err());
+        assert!(!temporary
+            .path()
+            .join("campaign/build/input-inventory.json")
+            .exists());
+
+        let (temporary, store) = self::store();
+        let inputs_root = tempfile::tempdir().unwrap();
+        let inputs = complete_public_inputs(inputs_root.path());
+        let mut prepared =
+            prepare_fixed_build_inputs(CAMPAIGN_ID, TARGET_TRIPLE, false, inputs).unwrap();
+        prepared.members[0].expected_fingerprint.sha256 = "F".repeat(64);
+        assert!(persist_fixed_build_inputs(&store, prepared).is_err());
+        assert!(temporary
+            .path()
+            .join("campaign/build/input-inventory.json")
+            .exists());
+        assert!(temporary
+            .path()
+            .join("campaign/build/input-files.bia")
+            .exists());
+
+        let (temporary, store) = self::store();
+        store
+            .write_build_input_archive(1, |writer| {
+                writer.write_all(b"x")?;
+                Ok(())
+            })
+            .unwrap();
+        let inputs_root = tempfile::tempdir().unwrap();
+        let result = capture_fixed_build_inventory(
+            &store,
+            CAMPAIGN_ID,
+            TARGET_TRIPLE,
+            false,
+            complete_public_inputs(inputs_root.path()),
+        );
+        assert!(result.is_err());
+        assert!(temporary
+            .path()
+            .join("campaign/build/input-inventory.json")
+            .exists());
     }
 }

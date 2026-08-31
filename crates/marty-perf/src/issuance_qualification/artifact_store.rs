@@ -15,9 +15,11 @@ use super::schedule::{ArtifactPath, ArtifactRole, ScheduledProcess};
 use super::{
     ensure_file_unchanged, open_absolute_directory, verified_directory_identity,
     verified_file_snapshot, FileIdentity, FileSnapshot, MAX_FIXED_BUILD_INPUT_BYTES,
+    MAX_SOURCE_ARCHIVE_V1_BYTES,
 };
 
 const BUILD_INPUT_ARCHIVE_PATH: &str = "build/input-files.bia";
+const BUILD_INPUT_INVENTORY_PATH: &str = "build/input-inventory.json";
 const STREAM_BUFFER_BYTES: usize = 8 * 1024;
 
 const FIXED_DIRECTORIES: &[&str] = &[
@@ -65,10 +67,30 @@ pub(super) struct PersistedBuildInputArchiveBytes {
     fingerprint: ArtifactFingerprint,
 }
 
+/// Store-bound proof that canonical build-input inventory bytes were durably persisted.
+pub(super) struct PersistedBuildInputInventoryBytes {
+    root_identity: FileIdentity,
+    snapshot: FileSnapshot,
+    fingerprint: ArtifactFingerprint,
+}
+
 impl PersistedBuildInputArchiveBytes {
     /// Returns the fingerprint of the durably retained archive bytes.
     pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
         &self.fingerprint
+    }
+}
+
+impl PersistedBuildInputInventoryBytes {
+    /// Returns the fingerprint of the durably retained inventory bytes.
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    /// Confirms that inventory and archive persistence capabilities share one campaign store.
+    pub(super) fn shares_store_with(&self, archive: &PersistedBuildInputArchiveBytes) -> bool {
+        self.root_identity == archive.root_identity
+            && self.snapshot.identity != archive.snapshot.identity
     }
 }
 
@@ -123,6 +145,28 @@ impl CampaignArtifactStore {
             emit,
         )?;
         Ok(PersistedBuildInputArchiveBytes {
+            root_identity: self.identity,
+            snapshot,
+            fingerprint,
+        })
+    }
+
+    pub(super) fn write_build_input_inventory(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PersistedBuildInputInventoryBytes> {
+        let path = ArtifactPath::canonical(BUILD_INPUT_INVENTORY_PATH.into())?;
+        let expected_length = u64::try_from(bytes.len()).context("artifact length overflow")?;
+        let (snapshot, fingerprint) = self.write_streamed_create_new(
+            &path,
+            expected_length,
+            MAX_SOURCE_ARCHIVE_V1_BYTES,
+            |writer| {
+                writer.write_all(bytes)?;
+                Ok(())
+            },
+        )?;
+        Ok(PersistedBuildInputInventoryBytes {
             root_identity: self.identity,
             snapshot,
             fingerprint,

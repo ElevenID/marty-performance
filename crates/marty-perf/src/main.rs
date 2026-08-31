@@ -234,6 +234,8 @@ enum IssuanceQualificationCommand {
     Plan(IssuanceQualificationPlanArgs),
     /// Validate the bounded offline artifact-integrity slice without qualifying it.
     Analyze(IssuanceQualificationAnalyzeArgs),
+    /// Work with an approved exact Git source archive without starting a campaign.
+    SourceArchive(IssuanceSourceArchiveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -269,6 +271,49 @@ impl IssuanceQualificationAnalyzeArgs {
             route_artifact: &self.route_artifact,
             anchor_public_key: &self.anchor_public_key,
             output: &self.output,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct IssuanceSourceArchiveArgs {
+    #[command(subcommand)]
+    command: IssuanceSourceArchiveCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum IssuanceSourceArchiveCommand {
+    /// Export one canonical `source/exact-tree.sar` from local Git objects.
+    Export(IssuanceSourceArchiveExportArgs),
+}
+
+#[derive(Debug, Args)]
+struct IssuanceSourceArchiveExportArgs {
+    /// Absolute root of a normal, clean Git worktree.
+    #[arg(long)]
+    repository: PathBuf,
+    /// Exact approved lowercase SHA-1 commit object identifier.
+    #[arg(long)]
+    source_commit: String,
+    /// Exact approved lowercase SHA-1 tree object identifier.
+    #[arg(long)]
+    source_tree: String,
+    /// Absolute create-new destination ending in `source/exact-tree.sar`.
+    #[arg(long)]
+    output: PathBuf,
+    /// Explicitly authorize export of the exact source commit.
+    #[arg(long)]
+    approve_source_export: bool,
+}
+
+impl IssuanceSourceArchiveExportArgs {
+    fn export_request(&self) -> issuance_qualification::SourceArchiveExportRequest<'_> {
+        issuance_qualification::SourceArchiveExportRequest {
+            repository: &self.repository,
+            source_commit: &self.source_commit,
+            source_tree: &self.source_tree,
+            output: &self.output,
+            source_export_approved: self.approve_source_export,
         }
     }
 }
@@ -358,6 +403,26 @@ fn main() -> Result<()> {
                 IssuanceQualificationCommand::Analyze(args) => {
                     issuance_qualification::analyze(&args.analysis_request())
                 }
+                IssuanceQualificationCommand::SourceArchive(args) => match args.command {
+                    IssuanceSourceArchiveCommand::Export(args) => {
+                        let receipt =
+                            issuance_qualification::export_source_archive(&args.export_request())?;
+                        println!(
+                            "Exported {} bytes (SHA-256 {}) for commit {} and tree {}; no campaign was created or qualified.",
+                            receipt.archive_fingerprint.byte_length,
+                            receipt.archive_fingerprint.sha256,
+                            receipt.source_commit,
+                            receipt.source_tree,
+                        );
+                        println!(
+                            "Cargo.lock: {} bytes (SHA-256 {}); source members: {}.",
+                            receipt.cargo_lock_fingerprint.byte_length,
+                            receipt.cargo_lock_fingerprint.sha256,
+                            receipt.entry_count,
+                        );
+                        Ok(())
+                    }
+                },
             },
         },
     }
@@ -404,5 +469,50 @@ mod qualification_analyze_cli_tests {
             Path::new("/trust/anchor-public-key.bin")
         );
         assert_eq!(request.output, Path::new("/reports/analysis.json"));
+    }
+
+    #[test]
+    fn source_archive_export_preserves_exact_pins_and_explicit_approval() {
+        let cli = Cli::try_parse_from([
+            "marty-perf",
+            "qualification",
+            "issuance",
+            "source-archive",
+            "export",
+            "--repository",
+            "/source-repository",
+            "--source-commit",
+            "c6199bfd61fb7e14b5d1a25a77ba9432cc36a0f7",
+            "--source-tree",
+            "10ca2f28172b555687ab244ace9569d71402b24a",
+            "--output",
+            "/retention/source/exact-tree.sar",
+            "--approve-source-export",
+        ])
+        .expect("parse source archive export command");
+        let Command::Qualification(qualification) = cli.command else {
+            panic!("qualification command")
+        };
+        let QualificationCommand::Issuance(issuance) = qualification.command;
+        let IssuanceQualificationCommand::SourceArchive(source_archive) = issuance.command else {
+            panic!("source archive command")
+        };
+        let IssuanceSourceArchiveCommand::Export(args) = source_archive.command;
+
+        let request = args.export_request();
+        assert_eq!(request.repository, Path::new("/source-repository"));
+        assert_eq!(
+            request.source_commit,
+            "c6199bfd61fb7e14b5d1a25a77ba9432cc36a0f7"
+        );
+        assert_eq!(
+            request.source_tree,
+            "10ca2f28172b555687ab244ace9569d71402b24a"
+        );
+        assert_eq!(
+            request.output,
+            Path::new("/retention/source/exact-tree.sar")
+        );
+        assert!(request.source_export_approved);
     }
 }

@@ -202,6 +202,32 @@ must explicitly attest that this exact source commit is approved for export;
 source bytes are the documented exception to operational-metadata privacy
 rules.
 
+The nonactivating source-export command produces that exact fixed-role artifact
+from local Git objects only:
+
+```text
+marty-perf qualification issuance source-archive export \
+  --repository /absolute/clean/source-repository \
+  --source-commit 40-lowercase-sha1 \
+  --source-tree 40-lowercase-sha1 \
+  --output /absolute/retention/source/exact-tree.sar \
+  --approve-source-export
+```
+
+The repository must be a normal clean SHA-1 worktree with its own self-contained
+`.git` directory. Inherited Git controls are scrubbed; replacement objects,
+lazy fetching, linked or common-directory metadata, alternate object stores,
+dirty tracked or untracked files, links, nonportable paths, case-fold aliases,
+and any source view that changes during export reject. The exporter reads no
+remote and includes only the approved raw commit plus every regular file in
+the exact tree, sorted by repository-relative path. It reconstructs and checks
+every blob, the complete tree, the commit, and the exact `Cargo.lock` through
+the same bounded validator used by retained evidence before creating a
+read-only `source/exact-tree.sar`. The destination parent must already exist;
+the file is create-new and cannot be placed beneath the source repository.
+This command creates no campaign, build receipt, qualification threshold,
+network request, benchmark result, or activation claim.
+
 `build/fixed-benchmark.json` then binds that verified archive and Cargo.lock to
 the exact Cargo and rustc binaries/versions, target, `bench` profile, sole
 `issuance_bench` feature, exact working directory and logical Cargo command,

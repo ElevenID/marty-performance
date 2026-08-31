@@ -8,7 +8,7 @@ use marty_perf_schema::ArtifactFingerprint;
 use sha2::{Digest, Sha256};
 
 use super::artifact_store::{
-    CampaignArtifactStore, MaterializedInputMember, MaterializedInputStore,
+    CampaignArtifactStore, MaterializedInputStore, MaterializedInputStoreBuilder,
     PersistedBuildInputArchiveBytes, PersistedBuildInputInventoryBytes,
 };
 use super::{
@@ -175,13 +175,13 @@ impl PersistedFixedBuildInputs {
 /// Proof that every verified archive member was published into one new immutable tree.
 pub(super) struct MaterializedBuildInputTree {
     store: MaterializedInputStore,
-    members: Vec<MaterializedInputMember>,
+    member_count: usize,
     aggregate_fingerprint: ArtifactFingerprint,
 }
 
 impl MaterializedBuildInputTree {
     pub(super) fn member_count(&self) -> usize {
-        self.members.len()
+        self.member_count
     }
 
     pub(super) fn aggregate_fingerprint(&self) -> &ArtifactFingerprint {
@@ -189,10 +189,6 @@ impl MaterializedBuildInputTree {
     }
 
     pub(super) fn ensure_unchanged(&self) -> Result<()> {
-        self.store.verify_root()?;
-        for member in &self.members {
-            member.ensure_unchanged()?;
-        }
         self.store.verify_root()
     }
 }
@@ -709,8 +705,12 @@ pub(super) fn materialize_fixed_build_inputs(
     let aggregate_fingerprint =
         materialized_aggregate(&inventory_fingerprint, &inventory.archive_fingerprint)?;
 
-    let store = MaterializedInputStore::create_new(absolute_destination)
-        .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+    let mut store = MaterializedInputStoreBuilder::create_new(
+        absolute_destination,
+        inventory.entry_count,
+        MAX_FIXED_BUILD_INPUT_BYTES,
+    )
+    .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
     let archive = capability.archive.retained_file_mut();
     archive
         .seek(SeekFrom::Start(0))
@@ -723,7 +723,7 @@ pub(super) fn materialize_fixed_build_inputs(
         magic == FIXED_BUILD_INPUT_ARCHIVE_MAGIC,
         "materialization rejected"
     );
-    let mut members = Vec::with_capacity(inventory.entries.len());
+    let member_count = inventory.entries.len();
     for entry in &inventory.entries {
         let mut encoded_length = [0_u8; 8];
         archive
@@ -745,7 +745,6 @@ pub(super) fn materialize_fixed_build_inputs(
             member.fingerprint() == &entry.fingerprint,
             "materialization rejected"
         );
-        members.push(member);
     }
     let mut trailing = [0_u8; 1];
     anyhow::ensure!(
@@ -763,12 +762,12 @@ pub(super) fn materialize_fixed_build_inputs(
         .inventory
         .ensure_unchanged()
         .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
-    store
+    let store = store
         .seal()
         .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
     let materialized = MaterializedBuildInputTree {
         store,
-        members,
+        member_count,
         aggregate_fingerprint,
     };
     materialized
@@ -839,8 +838,12 @@ mod tests {
     use std::fs;
 
     use super::*;
+    #[cfg(windows)]
+    use crate::issuance_qualification::artifact_store::MaterializedInputStoreBuilder;
     #[cfg(unix)]
-    use crate::issuance_qualification::artifact_store::CampaignArtifactStore;
+    use crate::issuance_qualification::artifact_store::{
+        CampaignArtifactStore, MaterializedInputStoreBuilder,
+    };
     use crate::issuance_qualification::fingerprint;
     #[cfg(unix)]
     use crate::issuance_qualification::{open_absolute_file, validate_build_input_archive_stream};
@@ -1505,6 +1508,185 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn bulk_builder_retains_no_member_handles_and_scans_only_at_seal() {
+        const MEMBER_COUNT: usize = 256;
+
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("inputs");
+        let expected = fingerprint(b"").unwrap();
+        let mut builder = MaterializedInputStoreBuilder::create_new(
+            &destination,
+            u32::try_from(MEMBER_COUNT).unwrap(),
+            1,
+        )
+        .unwrap();
+
+        for ordinal in 0..MEMBER_COUNT {
+            let relative = format!("fanout/member-{ordinal:04}");
+            let receipt = builder
+                .write_member(&relative, false, &expected, |_writer| Ok(()))
+                .unwrap();
+            assert_eq!(receipt.fingerprint(), &expected);
+            assert_eq!(builder.full_tree_scan_count_for_test(), 0);
+            assert_eq!(builder.retained_member_handle_count_for_test(), 0);
+        }
+
+        let store = builder.seal().unwrap();
+        assert_eq!(store.member_count_for_test(), MEMBER_COUNT);
+        assert_eq!(store.retained_member_handle_count_for_test(), 0);
+        assert_eq!(store.full_tree_scan_count_for_test(), 1);
+        store.verify_root().unwrap();
+        assert_eq!(store.full_tree_scan_count_for_test(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_member_poisons_partial_tree_and_destination_reuse() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("inputs");
+        let stable = fingerprint(b"stable").unwrap();
+        let expected = fingerprint(b"partial").unwrap();
+        let mut builder = MaterializedInputStoreBuilder::create_new(&destination, 2, 16).unwrap();
+        builder
+            .write_member("stable", false, &stable, |writer| {
+                writer.write_all(b"stable")?;
+                Ok(())
+            })
+            .unwrap();
+
+        let Err(error) = builder.write_member("partial", false, &expected, |writer| {
+            writer.write_all(b"par")?;
+            anyhow::bail!("synthetic writer failure")
+        }) else {
+            panic!("failed writer issued a member receipt")
+        };
+        assert_eq!(error.to_string(), "materialization rejected");
+        assert_eq!(fs::read(destination.join("stable")).unwrap(), b"stable");
+        assert_eq!(fs::read(destination.join("partial")).unwrap(), b"par");
+        assert!(builder.is_poisoned_for_test());
+        assert!(builder
+            .write_member("later", false, &fingerprint(b"later").unwrap(), |writer| {
+                writer.write_all(b"later")?;
+                Ok(())
+            })
+            .is_err());
+        assert!(builder.seal().is_err());
+        assert!(MaterializedInputStoreBuilder::create_new(&destination, 2, 16).is_err());
+        assert!(!destination.join("later").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn panicking_member_leaves_the_builder_poisoned_before_partial_mutation() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("inputs");
+        let expected = fingerprint(b"partial").unwrap();
+        let mut builder = MaterializedInputStoreBuilder::create_new(&destination, 2, 16).unwrap();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = builder.write_member("partial", false, &expected, |writer| {
+                writer.write_all(b"par")?;
+                panic!("synthetic writer panic")
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(fs::read(destination.join("partial")).unwrap(), b"par");
+        assert!(builder.is_poisoned_for_test());
+        assert!(builder
+            .write_member("later", false, &fingerprint(b"later").unwrap(), |writer| {
+                writer.write_all(b"later")?;
+                Ok(())
+            })
+            .is_err());
+        assert!(!destination.join("later").exists());
+        assert!(builder.seal().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn builder_limits_reject_before_creation_or_member_mutation() {
+        let parent = tempfile::tempdir().unwrap();
+        for (name, maximum_members, maximum_member_bytes) in [
+            ("zero-members", 0, 1),
+            ("too-many-members", MAX_FIXED_BUILD_INPUT_ENTRIES + 1, 1),
+            ("oversized-member-limit", 1, MAX_FIXED_BUILD_INPUT_BYTES + 1),
+        ] {
+            let destination = parent.path().join(name);
+            assert!(MaterializedInputStoreBuilder::create_new(
+                &destination,
+                maximum_members,
+                maximum_member_bytes,
+            )
+            .is_err());
+            assert!(!destination.exists(), "{name}");
+        }
+
+        let destination = parent.path().join("one-member");
+        let expected = fingerprint(b"first").unwrap();
+        let mut builder = MaterializedInputStoreBuilder::create_new(&destination, 1, 16).unwrap();
+        builder
+            .write_member("first", false, &expected, |writer| {
+                writer.write_all(b"first")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(builder
+            .write_member(
+                "second",
+                false,
+                &fingerprint(b"second").unwrap(),
+                |writer| {
+                    writer.write_all(b"second")?;
+                    Ok(())
+                }
+            )
+            .is_err());
+        assert_eq!(fs::read(destination.join("first")).unwrap(), b"first");
+        assert!(!destination.join("second").exists());
+        assert!(builder.is_poisoned_for_test());
+        assert!(builder.seal().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bulk_seal_rejects_untracked_entries_and_prior_member_drift() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for drift in ["extra", "member"] {
+            let parent = tempfile::tempdir().unwrap();
+            let destination = parent.path().join("inputs");
+            let expected = fingerprint(b"original").unwrap();
+            let mut builder =
+                MaterializedInputStoreBuilder::create_new(&destination, 1, 16).unwrap();
+            builder
+                .write_member("tracked", false, &expected, |writer| {
+                    writer.write_all(b"original")?;
+                    Ok(())
+                })
+                .unwrap();
+
+            match drift {
+                "extra" => fs::write(destination.join("untracked"), b"poison").unwrap(),
+                "member" => {
+                    let member = destination.join("tracked");
+                    fs::set_permissions(&member, fs::Permissions::from_mode(0o644)).unwrap();
+                    fs::write(&member, b"changed!").unwrap();
+                    fs::set_permissions(&member, fs::Permissions::from_mode(0o444)).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(builder.seal().is_err(), "{drift}");
+            assert!(destination.exists(), "{drift}");
+            assert!(MaterializedInputStoreBuilder::create_new(&destination, 1, 16).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn materialization_rejects_archive_drift_without_a_capability() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -1561,7 +1743,8 @@ mod tests {
 
         let destination_parent = tempfile::tempdir().unwrap();
         let destination = destination_parent.path().join("inputs");
-        let destination_store = MaterializedInputStore::create_new(&destination).unwrap();
+        let mut destination_store =
+            MaterializedInputStoreBuilder::create_new(&destination, 1, 64).unwrap();
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), destination.join("toolchain")).unwrap();
         let expected = fingerprint(b"synthetic member").unwrap();
@@ -1575,7 +1758,8 @@ mod tests {
 
         let corruption_parent = tempfile::tempdir().unwrap();
         let corruption_root = corruption_parent.path().join("inputs");
-        let corruption_store = MaterializedInputStore::create_new(&corruption_root).unwrap();
+        let mut corruption_store =
+            MaterializedInputStoreBuilder::create_new(&corruption_root, 1, 64).unwrap();
         let expected = fingerprint(b"original").unwrap();
         assert!(corruption_store
             .write_member("member", false, &expected, |writer| {
@@ -1777,5 +1961,17 @@ mod tests {
                 fs::set_permissions(&member, fs::Permissions::from_mode(0o444)).unwrap();
             })
             .is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn materialized_builder_fails_before_creation_without_directory_durability() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("inputs");
+        let Err(error) = MaterializedInputStoreBuilder::create_new(&destination, 1, 16) else {
+            panic!("unsupported Windows directory durability issued a builder")
+        };
+        assert_eq!(error.to_string(), "materialization rejected");
+        assert!(!destination.exists());
     }
 }

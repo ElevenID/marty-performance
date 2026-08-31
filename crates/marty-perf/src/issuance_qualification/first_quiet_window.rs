@@ -234,6 +234,14 @@ pub(super) struct FirstQuietWindowBindings {
 #[derive(Debug)]
 pub(super) struct ValidatedFirstQuietWindow {
     campaign_id: String,
+    source_commit: String,
+    source_tree: String,
+    source_archive_fingerprint: ArtifactFingerprint,
+    cargo_lock_fingerprint: ArtifactFingerprint,
+    target_triple: String,
+    build_profile: String,
+    controller_binary_fingerprint: ArtifactFingerprint,
+    rustc_verbose_version: String,
     evidence_fingerprint: ArtifactFingerprint,
     attestation_fingerprint: ArtifactFingerprint,
     baseline_process_set_fingerprint: ArtifactFingerprint,
@@ -251,12 +259,88 @@ impl ValidatedFirstQuietWindow {
         &self.evidence_fingerprint
     }
 
+    pub(super) fn source_commit(&self) -> &str {
+        &self.source_commit
+    }
+
+    pub(super) fn source_tree(&self) -> &str {
+        &self.source_tree
+    }
+
+    pub(super) fn source_archive_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.source_archive_fingerprint
+    }
+
+    pub(super) fn cargo_lock_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.cargo_lock_fingerprint
+    }
+
+    pub(super) fn target_triple(&self) -> &str {
+        &self.target_triple
+    }
+
+    pub(super) fn build_profile(&self) -> &str {
+        &self.build_profile
+    }
+
+    pub(super) fn controller_binary_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.controller_binary_fingerprint
+    }
+
+    pub(super) fn rustc_verbose_version(&self) -> &str {
+        &self.rustc_verbose_version
+    }
+
     pub(super) fn ended_at_monotonic_nanoseconds(&self) -> u64 {
         self.ended_at_monotonic_nanoseconds
     }
 
     pub(super) fn ended_at_utc_rfc3339_nanoseconds(&self) -> &str {
         &self.ended_at_utc_rfc3339_nanoseconds
+    }
+
+    /// Constructs an opaque test-only input for the fixed-build composition test.
+    #[cfg(test)]
+    pub(super) fn for_fixed_build_test(
+        campaign_id: String,
+        source_commit: String,
+        source_tree: String,
+        source_archive_fingerprint: ArtifactFingerprint,
+        cargo_lock_fingerprint: ArtifactFingerprint,
+        target_triple: String,
+    ) -> Self {
+        Self {
+            campaign_id,
+            source_commit,
+            source_tree,
+            source_archive_fingerprint,
+            cargo_lock_fingerprint,
+            target_triple,
+            build_profile: "bench".to_owned(),
+            controller_binary_fingerprint: ArtifactFingerprint {
+                sha256: "A".repeat(64),
+                byte_length: 1,
+            },
+            rustc_verbose_version: "rustc 1.95.0 (fixed-build-test)\n".to_owned(),
+            evidence_fingerprint: ArtifactFingerprint {
+                sha256: "B".repeat(64),
+                byte_length: 1,
+            },
+            attestation_fingerprint: ArtifactFingerprint {
+                sha256: "C".repeat(64),
+                byte_length: 1,
+            },
+            baseline_process_set_fingerprint: ArtifactFingerprint {
+                sha256: "D".repeat(64),
+                byte_length: 1,
+            },
+            process_set_fingerprints: vec![ArtifactFingerprint {
+                sha256: "E".repeat(64),
+                byte_length: 1,
+            }],
+            ended_at_monotonic_nanoseconds: 100,
+            ended_at_utc_rfc3339_nanoseconds: "2026-08-29T12:45:00.000000000Z".to_owned(),
+        }
     }
 }
 
@@ -580,6 +664,14 @@ fn validate_first_quiet_window_semantics(
     }
     let capability = ValidatedFirstQuietWindow {
         campaign_id: wire.campaign_id.clone(),
+        source_commit: bindings.source_commit.clone(),
+        source_tree: bindings.source_tree.clone(),
+        source_archive_fingerprint: bindings.source_archive_fingerprint.clone(),
+        cargo_lock_fingerprint: bindings.cargo_lock_fingerprint.clone(),
+        target_triple: bindings.target_triple.clone(),
+        build_profile: bindings.build_profile.clone(),
+        controller_binary_fingerprint: bindings.controller_binary_fingerprint.clone(),
+        rustc_verbose_version: bindings.rustc_verbose_version.clone(),
         evidence_fingerprint,
         attestation_fingerprint: wire.first_quiet_window_attestation_fingerprint.clone(),
         baseline_process_set_fingerprint: wire.baseline_unrelated_process_set_fingerprint.clone(),
@@ -1042,6 +1134,7 @@ mod tests {
         let attestation_bytes = bytes(&attestation);
         let attestation_fingerprint = fingerprint_bytes(&attestation_bytes).unwrap();
         let common = fingerprint();
+        let controller = fingerprint_bytes(b"distinct controller binary").unwrap();
         let start = chrono::DateTime::parse_from_rfc3339("2026-08-29T12:00:00.000000000Z").unwrap();
         let samples = (0..=270)
             .map(|ordinal| {
@@ -1069,7 +1162,7 @@ mod tests {
             plan_fingerprint: common.clone(),
             manifest_fingerprint: common.clone(),
             monitor_binary_fingerprint: common.clone(),
-            controller_binary_fingerprint: common.clone(),
+            controller_binary_fingerprint: controller.clone(),
             controller_configuration_fingerprint: common.clone(),
             monitor_configuration_fingerprint: common.clone(),
             external_anchor_channel_configuration_fingerprint: common.clone(),
@@ -1137,7 +1230,7 @@ mod tests {
             plan_fingerprint: common.clone(),
             manifest_fingerprint: common.clone(),
             monitor_binary_fingerprint: common.clone(),
-            controller_binary_fingerprint: common.clone(),
+            controller_binary_fingerprint: controller,
             controller_configuration_fingerprint: common.clone(),
             monitor_configuration_fingerprint: common.clone(),
             external_anchor_channel_configuration_fingerprint: common.clone(),
@@ -1208,6 +1301,63 @@ mod tests {
         assert_eq!(
             pending.capability.evidence_fingerprint(),
             &fingerprint_bytes(&evidence).unwrap()
+        );
+        assert_eq!(
+            pending.capability.controller_binary_fingerprint(),
+            &bindings.controller_binary_fingerprint
+        );
+        assert_eq!(
+            pending.capability.rustc_verbose_version(),
+            bindings.rustc_verbose_version
+        );
+    }
+
+    #[test]
+    fn fixed_build_projection_getters_preserve_independently_distinct_values() {
+        let fingerprint = |seed: char| ArtifactFingerprint {
+            sha256: seed.to_string().repeat(64),
+            byte_length: u64::from(seed as u32),
+        };
+        let capability = ValidatedFirstQuietWindow {
+            campaign_id: "123e4567-e89b-42d3-a456-426614174000".to_owned(),
+            source_commit: "1".repeat(40),
+            source_tree: "2".repeat(40),
+            source_archive_fingerprint: fingerprint('A'),
+            cargo_lock_fingerprint: fingerprint('B'),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            build_profile: "bench".to_owned(),
+            controller_binary_fingerprint: fingerprint('C'),
+            rustc_verbose_version: "rustc 1.95.0 (getter-test)\n".to_owned(),
+            evidence_fingerprint: fingerprint('D'),
+            attestation_fingerprint: fingerprint('E'),
+            baseline_process_set_fingerprint: fingerprint('F'),
+            process_set_fingerprints: vec![fingerprint('0')],
+            ended_at_monotonic_nanoseconds: 987_654_321,
+            ended_at_utc_rfc3339_nanoseconds: "2026-08-29T12:45:00.123456789Z".to_owned(),
+        };
+        assert_eq!(
+            capability.campaign_id(),
+            "123e4567-e89b-42d3-a456-426614174000"
+        );
+        assert_eq!(capability.source_commit(), "1".repeat(40));
+        assert_eq!(capability.source_tree(), "2".repeat(40));
+        assert_eq!(capability.source_archive_fingerprint(), &fingerprint('A'));
+        assert_eq!(capability.cargo_lock_fingerprint(), &fingerprint('B'));
+        assert_eq!(capability.target_triple(), "x86_64-unknown-linux-gnu");
+        assert_eq!(capability.build_profile(), "bench");
+        assert_eq!(
+            capability.controller_binary_fingerprint(),
+            &fingerprint('C')
+        );
+        assert_eq!(
+            capability.rustc_verbose_version(),
+            "rustc 1.95.0 (getter-test)\n"
+        );
+        assert_eq!(capability.evidence_fingerprint(), &fingerprint('D'));
+        assert_eq!(capability.ended_at_monotonic_nanoseconds(), 987_654_321);
+        assert_eq!(
+            capability.ended_at_utc_rfc3339_nanoseconds(),
+            "2026-08-29T12:45:00.123456789Z"
         );
     }
 

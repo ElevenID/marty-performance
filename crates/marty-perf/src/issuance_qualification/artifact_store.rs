@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
@@ -14,6 +15,8 @@ use fs_at::{read_dir as read_dir_at, OpenOptions as AtOpenOptions, OpenOptionsWr
 use marty_perf_schema::ArtifactFingerprint;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use uuid::Uuid;
 
 use super::schedule::{ArtifactPath, ArtifactRole, ScheduledProcess};
 use super::{
@@ -61,6 +64,7 @@ pub(super) struct CampaignArtifactStore {
     absolute_root: PathBuf,
     root: fs::File,
     identity: FileIdentity,
+    root_snapshot: Rc<Cell<FileSnapshot>>,
 }
 
 struct MaterializedMemberBinding {
@@ -95,6 +99,517 @@ pub(super) struct MaterializedInputStore {
     full_tree_scan_count: Cell<usize>,
 }
 
+pub(super) struct TrustedMaterializationBoundary {
+    parent_path: PathBuf,
+    parent: fs::File,
+    parent_identity: FileIdentity,
+    #[cfg(unix)]
+    parent_uid: u32,
+}
+
+impl TrustedMaterializationBoundary {
+    #[cfg(test)]
+    #[allow(
+        clippy::needless_return,
+        reason = "cfg-exclusive Unix and non-Unix constructors"
+    )]
+    pub(super) fn issue_for_test(absolute_root: &Path) -> Result<Self> {
+        let parent_path = absolute_root
+            .parent()
+            .context("materialization rejected")?
+            .to_owned();
+        let parent = open_absolute_directory(&parent_path, "materialization parent")?;
+        let parent_identity = verified_directory_identity(&parent, "materialization parent")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = parent.metadata()?;
+            anyhow::ensure!(
+                metadata.is_dir() && metadata.mode() & 0o022 == 0,
+                "materialization rejected"
+            );
+            // A create-new probe is owned by the effective uid that performed creation.  This
+            // avoids unsafe libc calls while proving the retained parent has that same owner.
+            let probe_name = format!(".marty-boundary-probe-{}", Uuid::new_v4());
+            let probe_path = parent_path.join(&probe_name);
+            let probe = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe_path)?;
+            let effective_uid = probe.metadata()?.uid();
+            drop(probe);
+            fs::remove_file(&probe_path)?;
+            anyhow::ensure!(metadata.uid() == effective_uid, "materialization rejected");
+            return Ok(Self {
+                parent_path,
+                parent,
+                parent_identity,
+                parent_uid: effective_uid,
+            });
+        }
+        #[cfg(not(unix))]
+        Ok(Self {
+            parent_path,
+            parent,
+            parent_identity,
+        })
+    }
+
+    fn verify(&self) -> Result<()> {
+        anyhow::ensure!(
+            verified_directory_identity(&self.parent, "materialization parent")?
+                == self.parent_identity,
+            "materialization rejected"
+        );
+        let reopened = open_absolute_directory(&self.parent_path, "materialization parent")?;
+        anyhow::ensure!(
+            verified_directory_identity(&reopened, "materialization parent")?
+                == self.parent_identity,
+            "materialization rejected"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = self.parent.metadata()?;
+            anyhow::ensure!(
+                metadata.is_dir()
+                    && metadata.uid() == self.parent_uid
+                    && metadata.mode() & 0o022 == 0,
+                "materialization rejected"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn parent_uid_for_creation(&self) -> u32 {
+        self.parent_uid
+    }
+
+    #[cfg(not(unix))]
+    #[allow(
+        clippy::unused_self,
+        reason = "signature matches the Unix trusted-boundary projection"
+    )]
+    fn parent_uid_for_creation(&self) -> u32 {
+        0
+    }
+}
+
+/// Create-new ownership of the common parent for the two fixed-build input trees.
+///
+/// The retained handles make this capability unforgeable from path strings alone.  It is
+/// intentionally sticky: once any path, identity, or child-set check fails it cannot recover.
+pub(super) struct MaterializedInputParent {
+    boundary: TrustedMaterializationBoundary,
+    absolute_root: PathBuf,
+    creation_parent: fs::File,
+    creation_parent_identity: FileIdentity,
+    root: fs::File,
+    identity: FileIdentity,
+    expected_snapshot: Cell<FileSnapshot>,
+    sealed_snapshot: Cell<Option<FileSnapshot>>,
+    invalid: Cell<bool>,
+}
+
+impl MaterializedInputParent {
+    pub(super) fn create_new(
+        boundary: TrustedMaterializationBoundary,
+        absolute_root: &Path,
+    ) -> Result<Self> {
+        Self::create_new_inner(boundary, absolute_root)
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
+    fn create_new_inner(
+        boundary: TrustedMaterializationBoundary,
+        absolute_root: &Path,
+    ) -> Result<Self> {
+        anyhow::ensure!(absolute_root.is_absolute(), "materialization rejected");
+        ensure_directory_durability_supported()?;
+        let parent_path = absolute_root.parent().context("materialization rejected")?;
+        let name = absolute_root
+            .file_name()
+            .context("materialization rejected")?;
+        anyhow::ensure!(
+            matches!(
+                absolute_root.components().next_back(),
+                Some(Component::Normal(_))
+            ) && !name.to_string_lossy().contains('\\'),
+            "materialization rejected"
+        );
+        anyhow::ensure!(
+            boundary.parent_path == parent_path,
+            "materialization rejected"
+        );
+        boundary.verify()?;
+        let creation_parent = boundary.parent.try_clone()?;
+        let creation_parent_identity =
+            verified_directory_identity(&creation_parent, "materialization parent")?;
+        let root = secure_create_directory_at(
+            &creation_parent,
+            name,
+            boundary.parent_uid_for_creation(),
+            false,
+        )?;
+        set_private_directory_permissions(&root)?;
+        sync_directory(&root)?;
+        sync_directory(&creation_parent)?;
+        let identity = verified_directory_identity(&root, "materialization root")?;
+        let expected_snapshot = handle_snapshot(&root, true, "materialization root")?;
+        anyhow::ensure!(
+            expected_snapshot.identity == identity,
+            "materialization rejected"
+        );
+        Ok(Self {
+            boundary,
+            absolute_root: absolute_root.to_owned(),
+            creation_parent,
+            creation_parent_identity,
+            root,
+            identity,
+            expected_snapshot: Cell::new(expected_snapshot),
+            sealed_snapshot: Cell::new(None),
+            invalid: Cell::new(false),
+        })
+    }
+
+    pub(super) fn absolute_root(&self) -> &Path {
+        &self.absolute_root
+    }
+
+    pub(super) fn create_child_builder(
+        &self,
+        name: &str,
+        maximum_members: u32,
+        maximum_member_bytes: u64,
+    ) -> Result<MaterializedInputStoreBuilder> {
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        let result = (|| {
+            self.ensure_expected_root_snapshot()?;
+            anyhow::ensure!(
+                self.sealed_snapshot.get().is_none(),
+                "materialization rejected"
+            );
+            anyhow::ensure!(
+                matches!(name, "worktree" | "inputs"),
+                "materialization rejected"
+            );
+            anyhow::ensure!(
+                (1..=MAX_MATERIALIZED_INPUT_MEMBERS).contains(&maximum_members),
+                "materialization rejected"
+            );
+            anyhow::ensure!(
+                maximum_member_bytes <= MAX_FIXED_BUILD_INPUT_BYTES,
+                "materialization rejected"
+            );
+            let created = secure_create_directory_at(
+                &self.root,
+                std::ffi::OsStr::new(name),
+                self.boundary.parent_uid_for_creation(),
+                true,
+            )?;
+            set_private_directory_permissions(&created)?;
+            sync_directory(&created)?;
+            sync_directory(&self.root)?;
+            let identity = verified_directory_identity(&created, "materialized input root")?;
+            self.ensure_root_inner()?;
+            let advanced_snapshot = handle_snapshot(&self.root, true, "materialization root")?;
+            anyhow::ensure!(
+                advanced_snapshot.identity == self.identity,
+                "materialization rejected"
+            );
+            self.expected_snapshot.set(advanced_snapshot);
+            Ok(MaterializedInputStoreBuilder {
+                tree: MaterializedInputTreeState {
+                    absolute_root: self.absolute_root.join(name),
+                    root: created,
+                    identity,
+                    maximum_members: usize::try_from(maximum_members)?,
+                    maximum_member_bytes,
+                    directories: BTreeMap::new(),
+                    members: BTreeMap::new(),
+                },
+                poisoned: false,
+            })
+        })();
+        self.fail_sticky(result)
+    }
+
+    fn ensure_root_inner(&self) -> Result<()> {
+        self.boundary.verify()?;
+        verify_private_materialization_root(&self.root)?;
+        anyhow::ensure!(
+            verified_directory_identity(&self.creation_parent, "materialization parent")?
+                == self.creation_parent_identity,
+            "materialization rejected"
+        );
+        anyhow::ensure!(
+            verified_directory_identity(&self.root, "materialization root")? == self.identity,
+            "materialization rejected"
+        );
+        let reopened_parent = open_absolute_directory(
+            self.absolute_root
+                .parent()
+                .context("materialization rejected")?,
+            "materialization parent",
+        )?;
+        anyhow::ensure!(
+            verified_directory_identity(&reopened_parent, "materialization parent")?
+                == self.creation_parent_identity,
+            "materialization rejected"
+        );
+        let component = self
+            .absolute_root
+            .file_name()
+            .context("materialization rejected")?
+            .to_os_string();
+        let reopened =
+            open_child_directory(&self.creation_parent, &component, "materialization root")?;
+        verify_private_materialization_root(&reopened)?;
+        anyhow::ensure!(
+            verified_directory_identity(&reopened, "materialization root")? == self.identity,
+            "materialization rejected"
+        );
+        Ok(())
+    }
+
+    fn ensure_expected_root_snapshot(&self) -> Result<()> {
+        self.ensure_root_inner()?;
+        anyhow::ensure!(
+            handle_snapshot(&self.root, true, "materialization root")?
+                == self.expected_snapshot.get(),
+            "materialization rejected"
+        );
+        Ok(())
+    }
+
+    fn fail_sticky<T>(&self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
+    pub(super) fn ensure_root(&self) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        self.fail_sticky(self.ensure_expected_root_snapshot())
+    }
+
+    pub(super) fn ensure_joint(
+        &self,
+        source: &MaterializedInputStore,
+        inputs: &MaterializedInputStore,
+    ) -> Result<()> {
+        self.ensure_joint_with_hook(source, inputs, || {})
+    }
+
+    fn ensure_joint_with_hook(
+        &self,
+        source: &MaterializedInputStore,
+        inputs: &MaterializedInputStore,
+        hook: impl FnOnce(),
+    ) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        let result = (|| {
+            self.ensure_expected_root_snapshot()?;
+            let candidate = handle_snapshot(&self.root, true, "materialization root")?;
+            anyhow::ensure!(
+                candidate == self.expected_snapshot.get(),
+                "materialization rejected"
+            );
+            if let Some(snapshot) = self.sealed_snapshot.get() {
+                anyhow::ensure!(candidate == snapshot, "materialization rejected");
+            }
+            source.verify_root()?;
+            source.verify_child_of(&self.root, "worktree")?;
+            inputs.verify_root()?;
+            inputs.verify_child_of(&self.root, "inputs")?;
+            verify_exact_materialization_children(&self.root)?;
+            hook();
+            anyhow::ensure!(
+                handle_snapshot(&self.root, true, "materialization root")? == candidate,
+                "materialization rejected"
+            );
+            self.ensure_expected_root_snapshot()?;
+            source.verify_root()?;
+            source.verify_child_of(&self.root, "worktree")?;
+            inputs.verify_root()?;
+            inputs.verify_child_of(&self.root, "inputs")?;
+            verify_exact_materialization_children(&self.root)?;
+            self.ensure_expected_root_snapshot()?;
+            anyhow::ensure!(
+                handle_snapshot(&self.root, true, "materialization root")? == candidate,
+                "materialization rejected"
+            );
+            if self.sealed_snapshot.get().is_none() {
+                self.sealed_snapshot.set(Some(candidate));
+            }
+            Ok(())
+        })();
+        self.fail_sticky(result)
+    }
+}
+
+fn verify_exact_materialization_children(root: &fs::File) -> Result<()> {
+    let mut actual = BTreeSet::new();
+    let mut observed = 0_usize;
+    let mut directory = root.try_clone()?;
+    for entry in read_dir_at(&mut directory)? {
+        observed = observed
+            .checked_add(1)
+            .context("materialization rejected")?;
+        anyhow::ensure!(observed <= 4, "materialization rejected");
+        let name = entry?.name().to_owned();
+        if name != "." && name != ".." {
+            anyhow::ensure!(actual.insert(name), "materialization rejected");
+        }
+    }
+    let expected = [OsString::from("inputs"), OsString::from("worktree")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(actual == expected, "materialization rejected");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_private_materialization_root(root: &fs::File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    anyhow::ensure!(
+        root.metadata()?.permissions().mode() & 0o7777 == 0o700,
+        "materialization rejected"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_create_directory_at(
+    parent: &fs::File,
+    final_name: &std::ffi::OsStr,
+    trusted_uid: u32,
+    require_private_parent: bool,
+) -> Result<fs::File> {
+    secure_create_directory_at_inner(
+        parent,
+        final_name,
+        trusted_uid,
+        require_private_parent,
+        |_| {},
+    )
+}
+
+#[cfg(unix)]
+fn secure_create_directory_at_inner(
+    parent: &fs::File,
+    final_name: &std::ffi::OsStr,
+    trusted_uid: u32,
+    require_private_parent: bool,
+    hook: impl FnOnce(&std::ffi::OsStr),
+) -> Result<fs::File> {
+    use rustix::fs::{
+        mkdirat, openat, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
+    };
+    use std::os::unix::fs::MetadataExt as _;
+    let verify_parent = || -> Result<()> {
+        let metadata = parent.metadata()?;
+        anyhow::ensure!(
+            metadata.is_dir() && metadata.uid() == trusted_uid,
+            "materialization rejected"
+        );
+        let mode = metadata.mode() & 0o7777;
+        anyhow::ensure!(
+            if require_private_parent {
+                mode == 0o700
+            } else {
+                mode & 0o022 == 0
+            },
+            "materialization rejected"
+        );
+        Ok(())
+    };
+    verify_parent()?;
+    let staging = OsString::from(format!(".marty-materialize-{}", Uuid::new_v4()));
+    mkdirat(parent, &staging, Mode::from_bits_truncate(0o700))?;
+    let result = (|| {
+        // The trusted-boundary precondition protects mkdir through this first no-follow stat.
+        // Same-euid and CAP_DAC_OVERRIDE peers therefore belong to the controller TCB.
+        let before = statat(parent, &staging, AtFlags::SYMLINK_NOFOLLOW)?;
+        anyhow::ensure!(
+            before.st_uid == trusted_uid
+                && before.st_mode & libc_mode_type_mask() == libc_directory_mode()
+                && before.st_mode & 0o7777 == 0o700,
+            "materialization rejected"
+        );
+        hook(&staging);
+        verify_parent()?;
+        let descriptor = openat(
+            parent,
+            &staging,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let staged = fs::File::from(descriptor);
+        let identity = verified_directory_identity(&staged, "materialization root")?;
+        anyhow::ensure!(
+            identity.volume == before.st_dev && identity.file == before.st_ino,
+            "materialization rejected"
+        );
+        let staged_metadata = staged.metadata()?;
+        anyhow::ensure!(
+            staged_metadata.uid() == trusted_uid,
+            "materialization rejected"
+        );
+        verify_private_materialization_root(&staged)?;
+        verify_parent()?;
+        renameat_with(parent, &staging, parent, final_name, RenameFlags::NOREPLACE)?;
+        verify_parent()?;
+        let final_component = final_name.to_os_string();
+        let published = open_child_directory(parent, &final_component, "materialization root")?;
+        anyhow::ensure!(
+            verified_directory_identity(&published, "materialization root")? == identity,
+            "materialization rejected"
+        );
+        anyhow::ensure!(
+            published.metadata()?.uid() == trusted_uid,
+            "materialization rejected"
+        );
+        verify_private_materialization_root(&published)?;
+        verify_parent()?;
+        Ok(published)
+    })();
+    if result.is_err() {
+        let _ = unlinkat(parent, &staging, AtFlags::REMOVEDIR);
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn secure_create_directory_at(
+    parent: &fs::File,
+    final_name: &std::ffi::OsStr,
+    _trusted_uid: u32,
+    _require_private_parent: bool,
+) -> Result<fs::File> {
+    AtOpenOptions::default()
+        .mkdir_at(parent, final_name)
+        .map_err(Into::into)
+}
+
+#[cfg(unix)]
+const fn libc_mode_type_mask() -> u32 {
+    0o170_000
+}
+
+#[cfg(unix)]
+const fn libc_directory_mode() -> u32 {
+    0o040_000
+}
+
+#[cfg(not(unix))]
+fn verify_private_materialization_root(_root: &fs::File) -> Result<()> {
+    Err(anyhow::anyhow!("materialization rejected"))
+}
+
 /// Lightweight receipt for one completed member write.
 pub(super) struct MaterializedInputMember {
     fingerprint: ArtifactFingerprint,
@@ -107,6 +622,7 @@ impl MaterializedInputMember {
 }
 
 impl MaterializedInputStoreBuilder {
+    #[cfg(test)]
     pub(super) fn create_new(
         absolute_root: &Path,
         maximum_members: u32,
@@ -448,6 +964,29 @@ fn expected_materialized_children(
 }
 
 impl MaterializedInputStore {
+    pub(super) fn absolute_root(&self) -> &Path {
+        &self.tree.absolute_root
+    }
+
+    pub(super) fn verify_child_of(&self, parent: &fs::File, name: &str) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        let result = (|| {
+            verify_materialized_root_binding(&self.tree)?;
+            let child =
+                open_child_directory(parent, &OsString::from(name), "materialized input root")?;
+            anyhow::ensure!(
+                verified_directory_identity(&child, "materialized input root")?
+                    == self.tree.identity,
+                "materialization rejected"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
     pub(super) fn verify_root(&self) -> Result<()> {
         self.verify_root_with_hook(|| {})
     }
@@ -593,7 +1132,13 @@ impl MaterializedInputStore {
 /// This capability attests only to persistence, identity, and fingerprinting. The later
 /// build-input slice remains responsible for validating archive framing and member semantics.
 pub(super) struct PersistedBuildInputArchiveBytes {
+    absolute_root: PathBuf,
+    root: fs::File,
     root_identity: FileIdentity,
+    root_snapshot: FileSnapshot,
+    build_directory: fs::File,
+    build_directory_identity: FileIdentity,
+    build_directory_snapshot: FileSnapshot,
     file: fs::File,
     snapshot: FileSnapshot,
     fingerprint: ArtifactFingerprint,
@@ -601,10 +1146,31 @@ pub(super) struct PersistedBuildInputArchiveBytes {
 
 /// Store-bound proof that canonical build-input inventory bytes were durably persisted.
 pub(super) struct PersistedBuildInputInventoryBytes {
+    absolute_root: PathBuf,
+    root: fs::File,
     root_identity: FileIdentity,
+    root_snapshot: FileSnapshot,
+    build_directory: fs::File,
+    build_directory_identity: FileIdentity,
+    build_directory_snapshot: FileSnapshot,
     file: fs::File,
     snapshot: FileSnapshot,
     fingerprint: ArtifactFingerprint,
+}
+
+/// Exact joint binding for the two persisted fixed-build input roles.
+///
+/// The inventory and archive are only meaningful together.  This capability retains the final
+/// root and `build` directory snapshots after both create-new writes and requires both role
+/// capabilities to name that exact root, directory, and two distinct files.
+pub(super) struct JointBuildInputPersistenceBinding {
+    absolute_root: PathBuf,
+    root: fs::File,
+    root_snapshot: FileSnapshot,
+    build_directory: fs::File,
+    build_directory_snapshot: FileSnapshot,
+    inventory_identity: FileIdentity,
+    archive_identity: FileIdentity,
 }
 
 struct BoundStreamedWrite {
@@ -624,11 +1190,14 @@ pub(super) struct PersistedSourceArchiveBytes {
     absolute_root: PathBuf,
     root: fs::File,
     root_identity: FileIdentity,
+    root_snapshot: Rc<Cell<FileSnapshot>>,
     source_directory: fs::File,
     source_directory_identity: FileIdentity,
+    source_directory_snapshot: FileSnapshot,
     file: fs::File,
     snapshot: FileSnapshot,
     fingerprint: ArtifactFingerprint,
+    invalid: Cell<bool>,
 }
 
 impl PersistedBuildInputArchiveBytes {
@@ -641,8 +1210,33 @@ impl PersistedBuildInputArchiveBytes {
         &mut self.file
     }
 
+    pub(super) fn retained_file(&self) -> &fs::File {
+        &self.file
+    }
+
     pub(super) fn ensure_unchanged(&self) -> Result<()> {
-        ensure_file_unchanged(&self.file, self.snapshot, "build-input archive")
+        ensure_bound_build_input_file(
+            &self.absolute_root,
+            &self.root,
+            self.root_identity,
+            &self.build_directory,
+            self.build_directory_identity,
+            &self.file,
+            self.snapshot,
+            "input-files.bia",
+            MAX_FIXED_BUILD_INPUT_BYTES,
+        )
+    }
+
+    fn ensure_capture_binding_unchanged(&self) -> Result<()> {
+        self.ensure_unchanged()?;
+        ensure_build_input_directory_snapshots(
+            &self.absolute_root,
+            &self.root,
+            self.root_snapshot,
+            &self.build_directory,
+            self.build_directory_snapshot,
+        )
     }
 }
 
@@ -656,15 +1250,195 @@ impl PersistedBuildInputInventoryBytes {
         &mut self.file
     }
 
-    pub(super) fn ensure_unchanged(&self) -> Result<()> {
-        ensure_file_unchanged(&self.file, self.snapshot, "build-input inventory")
+    pub(super) fn retained_file(&self) -> &fs::File {
+        &self.file
     }
 
-    /// Confirms that inventory and archive persistence capabilities share one campaign store.
-    pub(super) fn shares_store_with(&self, archive: &PersistedBuildInputArchiveBytes) -> bool {
-        self.root_identity == archive.root_identity
-            && self.snapshot.identity != archive.snapshot.identity
+    pub(super) fn ensure_unchanged(&self) -> Result<()> {
+        ensure_bound_build_input_file(
+            &self.absolute_root,
+            &self.root,
+            self.root_identity,
+            &self.build_directory,
+            self.build_directory_identity,
+            &self.file,
+            self.snapshot,
+            "input-inventory.json",
+            MAX_SOURCE_ARCHIVE_V1_BYTES,
+        )
     }
+
+    /// Revalidates the directory state captured when this role was written.
+    ///
+    /// This is intentionally used before the archive create-new write.  Once that authorized
+    /// second write changes the `build` directory, the joint capability binds the final snapshot.
+    pub(super) fn ensure_capture_binding_unchanged(&self) -> Result<()> {
+        self.ensure_unchanged()?;
+        ensure_build_input_directory_snapshots(
+            &self.absolute_root,
+            &self.root,
+            self.root_snapshot,
+            &self.build_directory,
+            self.build_directory_snapshot,
+        )
+    }
+}
+
+impl JointBuildInputPersistenceBinding {
+    /// Joins two fixed-role capabilities only when every store coordinate is identical and both
+    /// files are distinct.  The archive capture is the final directory state after both writes.
+    pub(super) fn bind(
+        inventory: &PersistedBuildInputInventoryBytes,
+        archive: &PersistedBuildInputArchiveBytes,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            inventory.absolute_root == archive.absolute_root
+                && inventory.root_identity == archive.root_identity
+                && inventory.build_directory_identity == archive.build_directory_identity
+                && inventory.snapshot.identity != archive.snapshot.identity,
+            "build input changed"
+        );
+        inventory.ensure_unchanged()?;
+        archive.ensure_capture_binding_unchanged()?;
+        let root_snapshot = handle_snapshot(&archive.root, true, "build input root")?;
+        let build_directory_snapshot =
+            handle_snapshot(&archive.build_directory, true, "build input directory")?;
+        anyhow::ensure!(
+            root_snapshot == archive.root_snapshot
+                && root_snapshot == inventory.root_snapshot
+                && build_directory_snapshot == archive.build_directory_snapshot,
+            "build input changed"
+        );
+        let binding = Self {
+            absolute_root: archive.absolute_root.clone(),
+            root: archive.root.try_clone()?,
+            root_snapshot,
+            build_directory: archive.build_directory.try_clone()?,
+            build_directory_snapshot,
+            inventory_identity: inventory.snapshot.identity,
+            archive_identity: archive.snapshot.identity,
+        };
+        binding.ensure_unchanged(inventory, archive)?;
+        Ok(binding)
+    }
+
+    /// Revalidates the exact joint store before and after both retained role checks.
+    pub(super) fn ensure_unchanged(
+        &self,
+        inventory: &PersistedBuildInputInventoryBytes,
+        archive: &PersistedBuildInputArchiveBytes,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            inventory.absolute_root == self.absolute_root
+                && archive.absolute_root == self.absolute_root
+                && inventory.root_identity == self.root_snapshot.identity
+                && archive.root_identity == self.root_snapshot.identity
+                && inventory.build_directory_identity == self.build_directory_snapshot.identity
+                && archive.build_directory_identity == self.build_directory_snapshot.identity
+                && inventory.snapshot.identity == self.inventory_identity
+                && archive.snapshot.identity == self.archive_identity
+                && self.inventory_identity != self.archive_identity,
+            "build input changed"
+        );
+        self.ensure_directories_unchanged()?;
+        inventory.ensure_unchanged()?;
+        archive.ensure_unchanged()?;
+        self.ensure_directories_unchanged()?;
+        archive.ensure_unchanged()?;
+        inventory.ensure_unchanged()?;
+        self.ensure_directories_unchanged()
+    }
+
+    fn ensure_directories_unchanged(&self) -> Result<()> {
+        ensure_build_input_directory_snapshots(
+            &self.absolute_root,
+            &self.root,
+            self.root_snapshot,
+            &self.build_directory,
+            self.build_directory_snapshot,
+        )
+    }
+}
+
+fn ensure_build_input_directory_snapshots(
+    absolute_root: &Path,
+    root: &fs::File,
+    root_snapshot: FileSnapshot,
+    build_directory: &fs::File,
+    build_directory_snapshot: FileSnapshot,
+) -> Result<()> {
+    anyhow::ensure!(
+        handle_snapshot(root, true, "build input root")? == root_snapshot,
+        "build input changed"
+    );
+    let reopened_root = open_absolute_directory(absolute_root, "build input root")?;
+    anyhow::ensure!(
+        handle_snapshot(&reopened_root, true, "build input root")? == root_snapshot,
+        "build input changed"
+    );
+    anyhow::ensure!(
+        handle_snapshot(build_directory, true, "build input directory")?
+            == build_directory_snapshot,
+        "build input changed"
+    );
+    let reopened_build = open_child_directory(
+        &reopened_root,
+        &OsString::from("build"),
+        "build input directory",
+    )?;
+    anyhow::ensure!(
+        handle_snapshot(&reopened_build, true, "build input directory")?
+            == build_directory_snapshot,
+        "build input changed"
+    );
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all retained fixed-role binding parts are checked together"
+)]
+fn ensure_bound_build_input_file(
+    absolute_root: &Path,
+    root: &fs::File,
+    root_identity: FileIdentity,
+    build_directory: &fs::File,
+    build_directory_identity: FileIdentity,
+    file: &fs::File,
+    snapshot: FileSnapshot,
+    name: &str,
+    maximum: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        verified_directory_identity(root, "build input root")? == root_identity,
+        "build input changed"
+    );
+    let reopened_root = open_absolute_directory(absolute_root, "build input root")?;
+    anyhow::ensure!(
+        verified_directory_identity(&reopened_root, "build input root")? == root_identity,
+        "build input changed"
+    );
+    anyhow::ensure!(
+        verified_directory_identity(build_directory, "build input directory")?
+            == build_directory_identity,
+        "build input changed"
+    );
+    let reopened_build =
+        open_child_directory(root, &OsString::from("build"), "build input directory")?;
+    anyhow::ensure!(
+        verified_directory_identity(&reopened_build, "build input directory")?
+            == build_directory_identity,
+        "build input changed"
+    );
+    let reopened = open_child_file(
+        &reopened_build,
+        std::ffi::OsStr::new(name),
+        maximum,
+        "build input",
+    )?;
+    anyhow::ensure!(reopened.snapshot == snapshot, "build input changed");
+    ensure_file_unchanged(file, snapshot, "build input")?;
+    ensure_file_unchanged(&reopened.file, snapshot, "build input")
 }
 
 impl PersistedSourceArchiveBytes {
@@ -678,34 +1452,69 @@ impl PersistedSourceArchiveBytes {
         &mut self.file
     }
 
-    fn verify_root_binding(&self) -> Result<()> {
-        anyhow::ensure!(
-            verified_directory_identity(&self.root, "source archive root")? == self.root_identity,
-            "source archive root changed"
-        );
-        let reopened = open_absolute_directory(&self.absolute_root, "source archive root")?;
-        anyhow::ensure!(
-            verified_directory_identity(&reopened, "source archive root")? == self.root_identity,
-            "source archive root binding changed"
-        );
-        Ok(())
+    #[cfg(all(test, unix))]
+    pub(super) fn absolute_path_for_test(&self) -> PathBuf {
+        self.absolute_root.join(SOURCE_ARCHIVE_PATH)
     }
 
-    fn reopen_bound_file(&self) -> Result<OpenedInput> {
-        self.verify_root_binding()?;
+    fn verify_directory_bindings(&self) -> Result<()> {
+        let expected_root_snapshot = self.root_snapshot.get();
         anyhow::ensure!(
-            verified_directory_identity(&self.source_directory, "source archive directory")?
-                == self.source_directory_identity,
+            handle_snapshot(&self.source_directory, true, "source archive directory")?
+                == self.source_directory_snapshot
+                && self.source_directory_snapshot.identity == self.source_directory_identity,
             "source archive directory changed"
         );
-        let source = open_child_directory(
+        let retained_path_source = open_child_directory(
             &self.root,
             &OsString::from("source"),
             "source archive directory",
         )?;
         anyhow::ensure!(
-            verified_directory_identity(&source, "source archive directory")?
-                == self.source_directory_identity,
+            handle_snapshot(&retained_path_source, true, "source archive directory")?
+                == self.source_directory_snapshot,
+            "source archive directory binding changed"
+        );
+        anyhow::ensure!(
+            handle_snapshot(&self.root, true, "source archive root")? == expected_root_snapshot
+                && expected_root_snapshot.identity == self.root_identity,
+            "source archive root changed"
+        );
+        let reopened_root = open_absolute_directory(&self.absolute_root, "source archive root")?;
+        anyhow::ensure!(
+            handle_snapshot(&reopened_root, true, "source archive root")? == expected_root_snapshot,
+            "source archive root binding changed"
+        );
+        let reopened_source = open_child_directory(
+            &reopened_root,
+            &OsString::from("source"),
+            "source archive directory",
+        )?;
+        anyhow::ensure!(
+            handle_snapshot(&reopened_source, true, "source archive directory")?
+                == self.source_directory_snapshot,
+            "source archive directory binding changed"
+        );
+        anyhow::ensure!(
+            handle_snapshot(&self.root, true, "source archive root")? == expected_root_snapshot
+                && handle_snapshot(&self.source_directory, true, "source archive directory")?
+                    == self.source_directory_snapshot,
+            "source archive directory changed"
+        );
+        Ok(())
+    }
+
+    fn reopen_bound_file(&self) -> Result<OpenedInput> {
+        self.verify_directory_bindings()?;
+        let reopened_root = open_absolute_directory(&self.absolute_root, "source archive root")?;
+        let source = open_child_directory(
+            &reopened_root,
+            &OsString::from("source"),
+            "source archive directory",
+        )?;
+        anyhow::ensure!(
+            handle_snapshot(&source, true, "source archive directory")?
+                == self.source_directory_snapshot,
             "source archive directory binding changed"
         );
         let opened = open_child_file(
@@ -723,15 +1532,27 @@ impl PersistedSourceArchiveBytes {
 
     /// Reopens the fixed role and rehashes the same immutable file through a snapshot sandwich.
     pub(super) fn ensure_unchanged(&self) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), "source archive changed");
+        let result = self.ensure_unchanged_inner();
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result
+    }
+
+    fn ensure_unchanged_inner(&self) -> Result<()> {
+        self.verify_directory_bindings()?;
         let mut reopened = self.reopen_bound_file()?;
         ensure_file_unchanged(&self.file, self.snapshot, "source archive")?;
         let actual = fingerprint_exact_source(&mut reopened.file, self.snapshot.byte_length)?;
         anyhow::ensure!(actual == self.fingerprint, "source archive changed");
         ensure_file_unchanged(&reopened.file, self.snapshot, "source archive")?;
         ensure_file_unchanged(&self.file, self.snapshot, "source archive")?;
-        self.verify_root_binding()?;
+        self.verify_directory_bindings()?;
         let final_reopen = self.reopen_bound_file()?;
-        ensure_file_unchanged(&final_reopen.file, self.snapshot, "source archive")
+        ensure_file_unchanged(&final_reopen.file, self.snapshot, "source archive")?;
+        ensure_file_unchanged(&self.file, self.snapshot, "source archive")?;
+        self.verify_directory_bindings()
     }
 }
 
@@ -780,6 +1601,8 @@ impl CampaignArtifactStore {
     ) -> Result<PersistedBuildInputArchiveBytes> {
         let path = ArtifactPath::canonical(BUILD_INPUT_ARCHIVE_PATH.into())?;
         let BoundStreamedWrite {
+            parent: build_directory,
+            parent_identity: build_directory_identity,
             file,
             snapshot,
             fingerprint,
@@ -790,12 +1613,24 @@ impl CampaignArtifactStore {
             MAX_FIXED_BUILD_INPUT_BYTES,
             emit,
         )?;
-        Ok(PersistedBuildInputArchiveBytes {
+        let root = self.root.try_clone()?;
+        let root_snapshot = handle_snapshot(&root, true, "build input root")?;
+        let build_directory_snapshot =
+            handle_snapshot(&build_directory, true, "build input directory")?;
+        let persisted = PersistedBuildInputArchiveBytes {
+            absolute_root: self.absolute_root.clone(),
+            root,
             root_identity: self.identity,
+            root_snapshot,
+            build_directory,
+            build_directory_identity,
+            build_directory_snapshot,
             file,
             snapshot,
             fingerprint,
-        })
+        };
+        persisted.ensure_capture_binding_unchanged()?;
+        Ok(persisted)
     }
 
     pub(super) fn write_build_input_inventory(
@@ -805,6 +1640,8 @@ impl CampaignArtifactStore {
         let path = ArtifactPath::canonical(BUILD_INPUT_INVENTORY_PATH.into())?;
         let expected_length = u64::try_from(bytes.len()).context("artifact length overflow")?;
         let BoundStreamedWrite {
+            parent: build_directory,
+            parent_identity: build_directory_identity,
             file,
             snapshot,
             fingerprint,
@@ -818,12 +1655,24 @@ impl CampaignArtifactStore {
                 Ok(())
             },
         )?;
-        Ok(PersistedBuildInputInventoryBytes {
+        let root = self.root.try_clone()?;
+        let root_snapshot = handle_snapshot(&root, true, "build input root")?;
+        let build_directory_snapshot =
+            handle_snapshot(&build_directory, true, "build input directory")?;
+        let persisted = PersistedBuildInputInventoryBytes {
+            absolute_root: self.absolute_root.clone(),
+            root,
             root_identity: self.identity,
+            root_snapshot,
+            build_directory,
+            build_directory_identity,
+            build_directory_snapshot,
             file,
             snapshot,
             fingerprint,
-        })
+        };
+        persisted.ensure_capture_binding_unchanged()?;
+        Ok(persisted)
     }
 
     /// Streams one exact source archive into its fixed create-new role and returns a bound handle.
@@ -861,15 +1710,21 @@ impl CampaignArtifactStore {
             root_identity == self.identity,
             "source archive root identity changed"
         );
+        let root_snapshot = Rc::clone(&self.root_snapshot);
+        let source_directory_snapshot =
+            handle_snapshot(&source_directory, true, "source archive directory")?;
         let persisted = PersistedSourceArchiveBytes {
             absolute_root: self.absolute_root.clone(),
             root,
             root_identity,
+            root_snapshot,
             source_directory,
             source_directory_identity,
+            source_directory_snapshot,
             file,
             snapshot,
             fingerprint,
+            invalid: Cell::new(false),
         };
         persisted.ensure_unchanged()?;
         Ok(persisted)
@@ -919,10 +1774,12 @@ impl CampaignArtifactStore {
             identity == created_identity,
             "campaign root identity changed"
         );
+        let root_snapshot = handle_snapshot(&root, true, "campaign root")?;
         Ok(Self {
             absolute_root: absolute_root.to_owned(),
             root,
             identity,
+            root_snapshot: Rc::new(Cell::new(root_snapshot)),
         })
     }
 
@@ -939,23 +1796,42 @@ impl CampaignArtifactStore {
         Ok(())
     }
 
-    pub(super) fn initialize_fixed_layout(&self) -> Result<()> {
+    fn verify_root_snapshot(&self) -> Result<()> {
         self.verify_root()?;
+        anyhow::ensure!(
+            handle_snapshot(&self.root, true, "campaign root")? == self.root_snapshot.get(),
+            "campaign root changed"
+        );
+        Ok(())
+    }
+
+    fn advance_root_snapshot(&self) -> Result<()> {
+        self.verify_root()?;
+        let snapshot = handle_snapshot(&self.root, true, "campaign root")?;
+        anyhow::ensure!(snapshot.identity == self.identity, "campaign root changed");
+        self.root_snapshot.set(snapshot);
+        Ok(())
+    }
+
+    pub(super) fn initialize_fixed_layout(&self) -> Result<()> {
+        self.verify_root_snapshot()?;
         for relative in FIXED_DIRECTORIES {
             self.create_directory_path(Path::new(relative))?;
         }
-        sync_directory(&self.root).context("sync campaign layout")
+        sync_directory(&self.root).context("sync campaign layout")?;
+        self.advance_root_snapshot()
     }
 
     pub(super) fn prepare_process_directories(
         &self,
         process: &ScheduledProcess<'_>,
     ) -> Result<ProcessArtifactPaths> {
-        self.verify_root()?;
+        self.verify_root_snapshot()?;
         let criterion_home = process.artifact_path(ArtifactRole::CriterionHome)?;
         let temporary_directory = process.artifact_path(ArtifactRole::TemporaryDirectory)?;
         self.create_directory_path(criterion_home.as_path())?;
         self.create_directory_path(temporary_directory.as_path())?;
+        self.advance_root_snapshot()?;
         Ok(ProcessArtifactPaths {
             criterion_home,
             temporary_directory,
@@ -1042,7 +1918,7 @@ impl CampaignArtifactStore {
             expected_length <= maximum,
             "campaign artifact exceeds byte limit"
         );
-        self.verify_root()?;
+        self.verify_root_snapshot()?;
         let mut components = validated_components(path.as_path())?;
         let name = components.pop().context("empty campaign artifact path")?;
         let parent = self.open_directory_components(&components)?;
@@ -1089,6 +1965,7 @@ impl CampaignArtifactStore {
             verified_directory_identity(&parent, "campaign artifact parent")? == parent_identity,
             "campaign artifact parent changed"
         );
+        self.advance_root_snapshot()?;
         Ok(BoundStreamedWrite {
             parent,
             parent_identity,
@@ -1455,6 +2332,11 @@ mod tests {
     use crate::issuance_qualification::{
         fingerprint, plan_for_manifest, schedule::QualificationSchedule,
     };
+
+    fn create_test_materialization_parent(root: &Path) -> Result<MaterializedInputParent> {
+        let boundary = TrustedMaterializationBoundary::issue_for_test(root)?;
+        MaterializedInputParent::create_new(boundary, root)
+    }
 
     #[cfg(not(windows))]
     struct Broken;
@@ -2045,6 +2927,291 @@ mod tests {
             error.to_string(),
             "campaign artifact store unavailable: durable directory synchronization is unsupported on Windows"
         );
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn fixed_materialization_parent_rejects_preexisting_root_before_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("fixed-root");
+        fs::create_dir(&root).unwrap();
+        let before = fs::read_dir(temporary.path()).unwrap().count();
+        assert!(create_test_materialization_parent(&root).is_err());
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), before);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn secure_directory_staging_substitution_between_mkdir_and_open_rejects() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = open_absolute_directory(temporary.path(), "test parent").unwrap();
+        let trusted_uid = parent.metadata().unwrap().uid();
+        let displaced = temporary.path().join("displaced-stage");
+        let result = secure_create_directory_at_inner(
+            &parent,
+            std::ffi::OsStr::new("published"),
+            trusted_uid,
+            false,
+            |staging| {
+                std::fs::rename(temporary.path().join(staging), &displaced).unwrap();
+                std::fs::create_dir(temporary.path().join(staging)).unwrap();
+                std::fs::set_permissions(
+                    temporary.path().join(staging),
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+            },
+        );
+        assert!(result.is_err());
+        assert!(!temporary.path().join("published").exists());
+        assert!(displaced.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_parent_exact_children_and_sticky_parent_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        let source = parent
+            .create_child_builder("worktree", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let inputs = parent
+            .create_child_builder("inputs", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        parent.ensure_joint(&source, &inputs).unwrap();
+
+        std::fs::create_dir(root_path.join("extra")).unwrap();
+        assert_eq!(
+            parent
+                .ensure_joint(&source, &inputs)
+                .unwrap_err()
+                .to_string(),
+            "materialization rejected"
+        );
+        std::fs::remove_dir(root_path.join("extra")).unwrap();
+        assert_eq!(
+            parent
+                .ensure_joint(&source, &inputs)
+                .unwrap_err()
+                .to_string(),
+            "materialization rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_parent_replacement_stays_poisoned_after_restoration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let displaced = temporary.path().join("displaced");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        let source = parent
+            .create_child_builder("worktree", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let inputs = parent
+            .create_child_builder("inputs", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        std::fs::rename(&root_path, &displaced).unwrap();
+        std::fs::create_dir(&root_path).unwrap();
+        assert!(parent.ensure_joint(&source, &inputs).is_err());
+        std::fs::remove_dir(&root_path).unwrap();
+        std::fs::rename(&displaced, &root_path).unwrap();
+        assert_eq!(
+            parent
+                .ensure_joint(&source, &inputs)
+                .unwrap_err()
+                .to_string(),
+            "materialization rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_parent_permission_drift_stays_poisoned() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(parent.ensure_root().is_err());
+        std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            parent.ensure_root().unwrap_err().to_string(),
+            "materialization rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_child_collision_stays_poisoned_after_removal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        std::fs::create_dir(root_path.join("worktree")).unwrap();
+        let Err(error) = parent.create_child_builder("worktree", 1, 1) else {
+            panic!("collision accepted")
+        };
+        assert_eq!(error.to_string(), "materialization rejected");
+        std::fs::remove_dir(root_path.join("worktree")).unwrap();
+        let Err(error) = parent.create_child_builder("worktree", 1, 1) else {
+            panic!("poison revived")
+        };
+        assert_eq!(error.to_string(), "materialization rejected");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_history_between_children_rejects_sticky() {
+        for mutation in ["root-swap-restore", "transient-child"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root_path = temporary.path().join("fixed");
+            let displaced = temporary.path().join("displaced-fixed");
+            let parent = create_test_materialization_parent(&root_path).unwrap();
+            let _source = parent
+                .create_child_builder("worktree", 1, 1)
+                .unwrap()
+                .seal()
+                .unwrap();
+            parent.ensure_root().unwrap();
+
+            if mutation == "root-swap-restore" {
+                std::fs::rename(&root_path, &displaced).unwrap();
+                std::fs::create_dir(&root_path).unwrap();
+                std::fs::remove_dir(&root_path).unwrap();
+                std::fs::rename(&displaced, &root_path).unwrap();
+            } else {
+                let transient = root_path.join("transient");
+                std::fs::create_dir(&transient).unwrap();
+                std::fs::remove_dir(&transient).unwrap();
+            }
+
+            let Err(error) = parent.create_child_builder("inputs", 1, 1) else {
+                panic!("common-root mutation history was accepted")
+            };
+            assert_eq!(error.to_string(), "materialization rejected");
+            assert_eq!(
+                parent.ensure_root().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+            assert!(!root_path.join("inputs").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_post_scan_insertion_stays_poisoned_after_removal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        let source = parent
+            .create_child_builder("worktree", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let inputs = parent
+            .create_child_builder("inputs", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        assert!(parent
+            .ensure_joint_with_hook(&source, &inputs, || {
+                std::fs::create_dir(root_path.join("late-extra")).unwrap();
+            })
+            .is_err());
+        std::fs::remove_dir(root_path.join("late-extra")).unwrap();
+        assert_eq!(
+            parent
+                .ensure_joint(&source, &inputs)
+                .unwrap_err()
+                .to_string(),
+            "materialization rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_transient_add_remove_inside_first_seal_rejects_sticky() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        let source = parent
+            .create_child_builder("worktree", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let inputs = parent
+            .create_child_builder("inputs", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let error = parent
+            .ensure_joint_with_hook(&source, &inputs, || {
+                let transient = root_path.join("transient");
+                std::fs::create_dir(&transient).unwrap();
+                std::fs::remove_dir(&transient).unwrap();
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "materialization rejected");
+        assert_eq!(
+            parent
+                .ensure_joint(&source, &inputs)
+                .unwrap_err()
+                .to_string(),
+            "materialization rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fixed_materialization_transient_child_swap_restore_inside_first_seal_rejects_sticky() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root_path = temporary.path().join("fixed");
+        let parent = create_test_materialization_parent(&root_path).unwrap();
+        let source = parent
+            .create_child_builder("worktree", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let inputs = parent
+            .create_child_builder("inputs", 1, 1)
+            .unwrap()
+            .seal()
+            .unwrap();
+        let error = parent
+            .ensure_joint_with_hook(&source, &inputs, || {
+                let displaced = root_path.join("displaced");
+                std::fs::rename(root_path.join("worktree"), &displaced).unwrap();
+                std::fs::create_dir(root_path.join("worktree")).unwrap();
+                std::fs::remove_dir(root_path.join("worktree")).unwrap();
+                std::fs::rename(&displaced, root_path.join("worktree")).unwrap();
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "materialization rejected");
+        assert_eq!(
+            parent
+                .ensure_joint(&source, &inputs)
+                .unwrap_err()
+                .to_string(),
+            "materialization rejected"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fixed_materialization_parent_windows_fails_before_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("fixed-root");
+        assert!(create_test_materialization_parent(&root).is_err());
         assert!(!root.exists());
     }
 }

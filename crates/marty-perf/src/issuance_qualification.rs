@@ -46,6 +46,11 @@ mod evidence_validation;
     reason = "the side-effect-free quiet-window kernel is controller plumbing and remains nonactivating"
 )]
 mod first_quiet_window;
+#[allow(
+    dead_code,
+    reason = "the nonactivating fixed-build preparation capability is future controller plumbing"
+)]
+mod fixed_build;
 mod schedule;
 #[allow(
     dead_code,
@@ -84,6 +89,7 @@ const MAX_TOTAL_EVIDENCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const FIXED_BUILD_ROOT_WINDOWS: &str = "M:/marty-cdla-build-v1";
 const FIXED_BUILD_ROOT_NON_WINDOWS: &str = "/marty-cdla-build-v1";
 const FIXED_BUILD_INPUT_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-BUILD-INPUT-ARCHIVE-V1\n";
+const FIXED_CARGO_CONFIGURATION_BYTES: &[u8] = b"[net]\noffline = true\n";
 const SOURCE_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-SOURCE-ARCHIVE-V1\n";
 
 pub(crate) fn write_plan(manifest_path: &Path, output_path: &Path) -> Result<()> {
@@ -1449,7 +1455,7 @@ fn fixed_binary_build_receipt_protocol() -> SdJwtIssuanceEvidenceRecordProtocol 
             ("installed_fixed_binary_fingerprint", ArtifactFingerprint, false),
         ]),
         "exactly_one_at_build/fixed-benchmark.json_created_after_first_quiet_window_and_before_genesis",
-        "all_source_toolchain_target_controller_build_input_inventory_and_build_input_archive_values_are_transitively_bound_by_genesis_and_fixed_role_preimages_and_the_inventory_archive_fingerprints_equal_each_other_target_triple_has_ASCII_length_1_through_128_and_every_byte_is_alphanumeric_hyphen_underscore_or_dot_build_profile_equals_bench_materialized_build_root_equals_the_exact_platform_canonical_root_working_directory_equals_ROOT/worktree_enabled_features_equals_exact_single_item_issuance_bench_cargo_and_rustc_verbose_versions_are_exact_command_stdout_valid_UTF8_at_most_4096_bytes_with_only_printable_ASCII_and_LF_and_no_endpoint_credential_or_diagnostic_suffix_rustc_reported_sysroot_equals_ROOT/inputs/toolchain_from_executing_the_inventoried_rustc_--print_sysroot_under_the_exact_cleared_build_environment_build_environment_policy_equals_trusted_controller_inventoried_inputs_cleared_offline_sandbox_v1_and_build_environment_equals_the_exact_platform_mapping_including_the_concrete_derived_target_linker_name_and_exact_SystemRoot_WINDIR_PATH_and_SOURCE_DATE_EPOCH_values_logical_argv_is_exactly_cargo_build_--frozen_--offline_--profile_bench_--no-default-features_--features_issuance_bench_--bench_sd_jwt_issuance_--target_target_triple_--message-format_json-render-diagnostics_with_the_record_target_triple_substituted_at_that_position_offline_dependency_resolution_argv_is_exactly_cargo_metadata_--frozen_--offline_--locked_--format-version_1_and_succeeded_is_true_for_a_real_prebuild_probe_under_the_same_materialized_tree_cleared_environment_and_read_sandbox_controller_mounts_one_private_create-new_campaign_directory_at_the_exact_canonical_root_securely_materializes_only_the_verified_source_archive_under_ROOT/worktree_and_the_verified_build_input_archive_under_ROOT/inputs_preserving_the_Rust_distribution_toolchain/bin_and_toolchain/lib_layout_clears_environment_then_adds_only_the_closed_table_disables_network_and_incremental_compilation_forces_the_fingerprinted_rustc_target_linker_archiver_sysroot_dependency_sources_Cargo_configuration_dynamic_tool_and_staged_Windows_runtime_inputs_rejects_RUSTC_WRAPPER_RUSTC_WORKSPACE_WRAPPER_RUSTFLAGS_CARGO_ENCODED_RUSTFLAGS_or_any_unlisted_variable_and_sandboxes_reads_to_worktree_and_inventoried_inputs_and_writes_to_ROOT/target_and_ROOT/tmp_all_Cargo_generated_absolute_environment_values_including_CARGO_MANIFEST_DIR_and_OUT_DIR_are_deterministically_derived_from_ROOT_source_target_profile_and_package_metadata_and_any_other_observed_generated_value_rejects_controller_runs_only_the_probes_and_build_command_accepts_exactly_one_Cargo_compiler-artifact_executable_for_bench_sd_jwt_issuance_hashes_it_before_installation_copies_it_create_new_to_the_target-selected_fixed_binary_path_and_requires_produced_installed_and_genesis_fixed_binary_fingerprints_equal_build_started_is_after_the_first_quiet_window_end_build_finished_equals_or_follows_start_and_precedes_genesis_monotonic_checked_subtraction_and_all_archive_member_tool_dependency_configuration_environment_path_source_and_binary_fingerprints_bind_actual_bytes",
+        "all_source_toolchain_target_controller_build_input_inventory_and_build_input_archive_values_are_transitively_bound_by_genesis_and_fixed_role_preimages_and_the_inventory_archive_fingerprints_equal_each_other_target_triple_has_ASCII_length_1_through_128_every_byte_is_alphanumeric_hyphen_underscore_or_dot_and_is_not_dot_dotdot_host-tuple_or_any_ASCII_case_fold_suffix_.json_build_profile_equals_bench_materialized_build_root_equals_the_exact_platform_canonical_root_working_directory_equals_ROOT/worktree_enabled_features_equals_exact_single_item_issuance_bench_cargo_and_rustc_verbose_versions_are_exact_command_stdout_valid_UTF8_at_most_4096_bytes_with_only_printable_ASCII_and_LF_and_no_endpoint_credential_or_diagnostic_suffix_rustc_reported_sysroot_equals_ROOT/inputs/toolchain_from_executing_the_inventoried_rustc_--print_sysroot_under_the_exact_cleared_build_environment_build_environment_policy_equals_trusted_controller_inventoried_inputs_cleared_offline_sandbox_v1_and_build_environment_equals_the_exact_platform_mapping_including_the_concrete_derived_target_linker_name_and_exact_SystemRoot_WINDIR_PATH_and_SOURCE_DATE_EPOCH_values_logical_argv_is_exactly_cargo_build_--frozen_--offline_--profile_bench_--no-default-features_--features_issuance_bench_--bench_sd_jwt_issuance_--target_target_triple_--message-format_json-render-diagnostics_with_the_record_target_triple_substituted_at_that_position_offline_dependency_resolution_argv_is_exactly_cargo_metadata_--frozen_--offline_--locked_--format-version_1_and_succeeded_is_true_for_a_real_prebuild_probe_under_the_same_materialized_tree_cleared_environment_and_read_sandbox_controller_mounts_one_private_create-new_campaign_directory_at_the_exact_canonical_root_securely_materializes_only_the_verified_source_archive_under_ROOT/worktree_and_the_verified_build_input_archive_under_ROOT/inputs_preserving_the_Rust_distribution_toolchain/bin_and_toolchain/lib_layout_clears_environment_then_adds_only_the_closed_table_disables_network_and_incremental_compilation_declares_only_execution_intent_for_the_fingerprinted_rustc_target_linker_archiver_sysroot_dependency_sources_Cargo_configuration_dynamic_tool_and_staged_Windows_runtime_inputs_and_does_not_attest_actual_child_resolution_rejects_RUSTC_WRAPPER_RUSTC_WORKSPACE_WRAPPER_RUSTFLAGS_CARGO_ENCODED_RUSTFLAGS_or_any_unlisted_variable_and_sandboxes_reads_to_worktree_and_inventoried_inputs_and_writes_to_ROOT/target_and_ROOT/tmp_all_Cargo_generated_absolute_environment_values_including_CARGO_MANIFEST_DIR_and_OUT_DIR_are_deterministically_derived_from_ROOT_source_target_profile_and_package_metadata_and_any_other_observed_generated_value_rejects_controller_runs_only_the_probes_and_build_command_accepts_exactly_one_Cargo_compiler-artifact_executable_for_bench_sd_jwt_issuance_hashes_it_before_installation_copies_it_create_new_to_the_target-selected_fixed_binary_path_and_requires_produced_installed_and_genesis_fixed_binary_fingerprints_equal_build_started_is_after_the_first_quiet_window_end_build_finished_equals_or_follows_start_and_precedes_genesis_monotonic_checked_subtraction_and_all_archive_member_tool_dependency_configuration_environment_path_source_and_binary_fingerprints_bind_actual_bytes",
     )
 }
 
@@ -1504,6 +1510,7 @@ fn fixed_build_environment_entry_fields() -> Vec<SdJwtIssuanceEvidenceFieldProto
 
 fn fixed_build_environment_allowlist() -> Vec<String> {
     [
+        "AR",
         "CARGO_HOME",
         "CARGO_INCREMENTAL",
         "CARGO_NET_OFFLINE",
@@ -1593,18 +1600,18 @@ fn global_preimage_protocol() -> SdJwtIssuanceGlobalPreimageProtocol {
         fixed_binary_build_input_inventory_entry_fields:
             fixed_build_input_inventory_entry_fields(),
         fixed_binary_build_input_role_literals: fixed_build_input_role_literals(),
-        fixed_binary_build_input_role_rule: "cargo_executable_and_rustc_executable_each_have_exactly_one_entry_at_toolchain/bin/cargo_or_cargo.exe_and_toolchain/bin/rustc_or_rustc.exe_rustc_sysroot_file_has_at_least_one_entry_under_toolchain_and_completes_the_same_distribution_whose_inventoried_rustc_reports_ROOT/inputs/toolchain_target_linker_executable_and_target_archiver_executable_each_have_exactly_one_entry_under_tools/linker_and_tools/archiver_cargo_dependency_source_has_at_least_one_entry_under_cargo-home/registry/src_or_cargo-home/git/checkouts_cargo_configuration_has_exactly_one_entry_at_cargo-home/config.toml_executable_path_input_is_zero_or_more_under_one_declared_executable_path_directory_tool_dynamic_dependency_is_zero_or_more_beside_its_consuming_inventoried_tool_or_under_tools/runtime_windows_runtime_input_is_absent_on_non-Windows_and_at_least_one_under_windows-runtime/SystemRoot_on_Windows_every_file_read_by_the_build_has_exactly_one_entry_and_no_role_alias_cross-root_or_uninventoried_input_is_valid".to_owned(),
-        fixed_binary_build_input_path_rule: "entry_relative_paths_use_the_same_portable_ASCII_segment_grammar_bounds_and_exact_.git_component_prohibition_as_source_archive_paths_are_strictly_sorted_unique_by_role_then_unsigned_path_bytes_and_are_relative_to_the_canonical_materialized_build_ROOT/inputs_directory_executable_path_directories_is_the_exact_ordered_unique_array_toolchain/bin_tools/linker_tools/archiver_tools/runtime_each_directory_contains_an_inventoried_executable_PATH_is_reconstructed_by_joining_ROOT/inputs_to_these_entries_in_exact_array_order_CARGO_HOME_resolves_the_same_ROOT/inputs/cargo-home_tree_and_RUSTC_resolves_the_same_ROOT/inputs/toolchain/bin_member_whose_reported_sysroot_is_ROOT/inputs/toolchain_on_Windows_SystemRoot_and_WINDIR_resolve_the_same_staged_ROOT/inputs/windows-runtime/SystemRoot_tree_no_member_is_materialized_twice_and_unknown_absolute_parent_backslash_drive_ADS_device_case-fold_file-directory-prefix_or_target-filesystem_alias_paths_reject".to_owned(),
+        fixed_binary_build_input_role_rule: "cargo_executable_and_rustc_executable_each_have_exactly_one_entry_at_toolchain/bin/cargo_or_cargo.exe_and_toolchain/bin/rustc_or_rustc.exe_rustc_sysroot_file_has_at_least_one_entry_under_toolchain_and_completes_the_same_distribution_whose_inventoried_rustc_reports_ROOT/inputs/toolchain_target_linker_executable_and_target_archiver_executable_each_have_exactly_one_entry_under_tools/linker_and_tools/archiver_cargo_dependency_source_has_at_least_one_entry_under_cargo-home/registry/src_or_cargo-home/git/checkouts_cargo_configuration_has_exactly_one_entry_at_cargo-home/config.toml_with_exact_bytes_[net]_LFoffline_space_equals_space_true_LF_and_no_other_table_or_field_source_archive_rejects_every_ASCII_case_fold_.cargo_component_executable_path_input_is_zero_or_more_under_one_declared_executable_path_directory_tool_dynamic_dependency_is_zero_or_more_beside_its_consuming_inventoried_tool_or_under_tools/runtime_windows_runtime_input_is_absent_on_non-Windows_and_at_least_one_under_windows-runtime/SystemRoot_on_Windows_every_file_read_by_the_build_has_exactly_one_entry_and_no_role_alias_cross-root_or_uninventoried_input_is_valid".to_owned(),
+        fixed_binary_build_input_path_rule: "entry_relative_paths_use_the_same_portable_ASCII_segment_grammar_bounds_and_exact_ASCII-case-fold_.git_or_.cargo_component_prohibition_as_source_archive_paths_are_strictly_sorted_unique_by_role_then_unsigned_path_bytes_and_are_relative_to_the_canonical_materialized_build_ROOT/inputs_directory_executable_path_directories_is_the_exact_ordered_unique_array_toolchain/bin_tools/linker_tools/archiver_tools/runtime_each_directory_contains_an_inventoried_executable_PATH_is_reconstructed_by_joining_ROOT/inputs_to_these_entries_in_exact_array_order_CARGO_HOME_resolves_the_same_ROOT/inputs/cargo-home_tree_and_RUSTC_resolves_the_same_ROOT/inputs/toolchain/bin_member_whose_reported_sysroot_is_ROOT/inputs/toolchain_on_Windows_SystemRoot_and_WINDIR_resolve_the_same_staged_ROOT/inputs/windows-runtime/SystemRoot_tree_no_member_is_materialized_twice_and_unknown_absolute_parent_backslash_drive_ADS_device_case-fold_file-directory-prefix_or_target-filesystem_alias_paths_reject".to_owned(),
         fixed_binary_build_input_mode_literals: fixed_build_input_mode_literals(),
         fixed_binary_build_input_archive_format: "one_exact_build/input-files.bia_binary_stream_beginning_with_exact_ASCII_bytes_MARTY-SD-JWT-BUILD-INPUT-ARCHIVE-V1_plus_LF_then_for_each_build/input-inventory.json_entry_in_its_exact_canonical_order_one_unsigned_64_bit_big_endian_content_length_and_exact_file_bytes_then_immediate_EOF_no_paths_modes_alignment_padding_unused_metadata_or_trailing_byte_the_separate_inventory_is_the_only_manifest".to_owned(),
         fixed_binary_build_input_archive_rule: "controller_and_analyzer_open_the_archive_create-new_or_no-follow_read-only_verify_its_outer_SHA256_and_length_against_both_inventory.archive_fingerprint_and_build_receipt.build_input_archive_fingerprint_before_parsing_then_stream_a_second_pass_over_the_same_immutable_handle_without_buffering_the_archive_or_allocating_from_unverified_lengths_complete_archive_length_including_magic_and_framing_is_at_most_maximum_build_input_bytes_entry_count_is_at_most_maximum_fixed_binary_build_input_entries_every_length_equals_the_corresponding_inventory_fingerprint.byte_length_checked_member_SHA256_matches_that_fingerprint_checked_member_sum_equals_inventory.total_byte_length_file_mode_is_exactly_100644_or_100755_and_executed_tools_are_100755_members_and_inventory_are_one-to-one_in_identical_order_and_missing_extra_reordered_duplicate_link_device_or_trailing_members_reject_secure_materialization_preserves_portable_logical_mode_as_read-only_data_or_read-only_executable_without_host_ACL_metadata_and_all_build_reads_are_confined_to_the_verified_materialization".to_owned(),
         maximum_fixed_binary_build_input_entries: MAX_FIXED_BUILD_INPUT_ENTRIES,
         fixed_binary_build_environment_entry_fields: fixed_build_environment_entry_fields(),
         fixed_binary_build_environment_allowlist: fixed_build_environment_allowlist(),
-        fixed_binary_build_environment_mapping_rule: "entries_are_in_allowlist_order_with_exact_name_value_kind_and_nonnull_resolved_value_CARGO_HOME_canonical_absolute_path_ROOT/inputs/cargo-home_CARGO_INCREMENTAL_literal_0_CARGO_NET_OFFLINE_literal_true_CARGO_TARGET_DIR_canonical_absolute_path_ROOT/target_the_wire_name_for_the_target_linker_is_the_concrete_CARGO_TARGET_plus_underscore_plus_target_triple_ASCII_uppercase_with_each_hyphen_underscore_or_dot_replaced_by_underscore_plus_underscore_LINKER_any_other_target_byte_and_any_template_brace_rejects_and_its_value_is_the_unique_inventoried_absolute_target_linker_member_below_ROOT/inputs/tools/linker_PATH_ordered_absolute_path_list_is_ROOT/inputs_joined_to_executable_path_directories_in_exact_inventory_order_RUSTC_inventoried_absolute_path_ROOT/inputs/toolchain/bin/RUSTC_FILE_SOURCE_DATE_EPOCH_literal_exact_canonical_unsigned_decimal_sole_validated_commit_committer_Unix_timestamp_TEMP_and_TMP_canonical_absolute_path_ROOT/tmp_and_on_Windows_only_SystemRoot_and_WINDIR_are_both_canonical_absolute_path_ROOT/inputs/windows-runtime/SystemRoot_non-Windows_has_exactly_10_entries_and_Windows_has_exactly_12_each_name_appears_once_ROOT_equals_the_exact_platform_fixed_binary_build_root_no_other_name_kind_value_duplicate_case-fold_alias_wrapper_flag_config_ambient_live_SystemRoot_or_unrecorded_resolved_path_is_valid".to_owned(),
+        fixed_binary_build_environment_mapping_rule: "entries_are_in_allowlist_order_with_exact_name_value_kind_and_nonnull_resolved_value_AR_inventoried_absolute_path_is_the_unique_target_archiver_member_below_ROOT/inputs/tools/archiver_CARGO_HOME_canonical_absolute_path_ROOT/inputs/cargo-home_CARGO_INCREMENTAL_literal_0_CARGO_NET_OFFLINE_literal_true_CARGO_TARGET_DIR_canonical_absolute_path_ROOT/target_target_triple_has_ASCII_length_1_through_128_every_byte_is_alphanumeric_hyphen_underscore_or_dot_and_is_not_dot_dotdot_host-tuple_or_any_ASCII_case_fold_suffix_.json_the_wire_name_for_the_target_linker_is_the_concrete_CARGO_TARGET_plus_underscore_plus_target_triple_ASCII_uppercase_with_each_hyphen_underscore_or_dot_replaced_by_underscore_plus_underscore_LINKER_any_other_target_byte_and_any_template_brace_rejects_and_its_value_is_the_unique_inventoried_absolute_target_linker_member_below_ROOT/inputs/tools/linker_PATH_ordered_absolute_path_list_is_ROOT/inputs_joined_to_executable_path_directories_in_exact_inventory_order_RUSTC_inventoried_absolute_path_ROOT/inputs/toolchain/bin/RUSTC_FILE_SOURCE_DATE_EPOCH_literal_exact_canonical_unsigned_decimal_sole_validated_commit_committer_Unix_timestamp_TEMP_and_TMP_canonical_absolute_path_ROOT/tmp_and_on_Windows_only_SystemRoot_and_WINDIR_are_both_canonical_absolute_path_ROOT/inputs/windows-runtime/SystemRoot_non-Windows_has_exactly_11_entries_and_Windows_has_exactly_13_each_name_appears_once_ROOT_equals_the_exact_platform_fixed_binary_build_root_no_other_name_kind_value_duplicate_case-fold_alias_wrapper_flag_config_ambient_live_SystemRoot_or_unrecorded_resolved_path_is_valid".to_owned(),
         fixed_binary_build_root_windows: FIXED_BUILD_ROOT_WINDOWS.to_owned(),
         fixed_binary_build_root_non_windows: FIXED_BUILD_ROOT_NON_WINDOWS.to_owned(),
-        fixed_binary_build_rule: "trusted_controller_receipt_complete_build_input_inventory_and_retained_build_input_archive_are_part_of_the_anchored_genesis_chain_and_are_the_only_v2_link_from_verified_source_archive_Cargo_lock_exact_retained_dependency_sources_Cargo_configuration_Rust_distribution_sysroot_Cargo_rustc_linker_archiver_dynamic_tool_and_staged_Windows_runtime_bytes_exact_canonical_materialized_build_root_generated_Cargo_environment_values_real_offline_dependency_probe_build_command_working_directory_sandbox_and_typed_cleared_offline_environment_to_the_actual_installed_fixed_binary_analyzer_reconstructs_the_exact_retained_tree_from_verified_archive_members_repeats_rustc_--print_sysroot_and_exact_cargo_metadata_--frozen_--offline_--locked_--format-version_1_under_the_same_typed_cleared_environment_working_directory_and_read_sandbox_and_requires_success_the_exact_reported_sysroot_and_the_same_resolved_dependency_graph_before_accepting_the_receipt_stale_extra_ambient_relocated_substituted_unretained_or_differently_built_binary_invalidates_the_campaign".to_owned(),
+        fixed_binary_build_rule: "trusted_materialization_boundary_is_opaque_noncloneable_and_issued_only_after_controller_namespace_mount_and_process_isolation_excludes_untrusted_peers_controls_the_full_working_directory_ancestor_chain_through_filesystem_root_and_proves_every_ancestor_has_neither_.cargo/config_nor_.cargo/config.toml_same_effective_uid_and_CAP_DAC_OVERRIDE_peers_are_inside_the_controller_TCB_no_issuer_exists_in_this_preparation_phase_so_activation_is_unavailable_AR_linker_and_PATH_values_are_execution_intent_only_and_do_not_attest_actual_child_resolution_runtime_controller_and_receipt_must_attest_exact_cargo_--version_--verbose_and_every_compiler_wrapper_linker_archiver_host_script_proc_macro_child_identity_argv_and_environment_no_effective_configuration_closure_or_execution_claim_exists_in_this_phase_runtime_execution_and_tool_resolution_attestation_remain_controller_and_receipt_obligations_trusted_controller_receipt_complete_build_input_inventory_and_retained_build_input_archive_are_part_of_the_anchored_genesis_chain_and_are_the_only_v2_link_from_verified_source_archive_Cargo_lock_exact_retained_dependency_sources_Cargo_configuration_Rust_distribution_sysroot_Cargo_rustc_linker_archiver_dynamic_tool_and_staged_Windows_runtime_bytes_exact_canonical_materialized_build_root_generated_Cargo_environment_values_real_offline_dependency_probe_build_command_working_directory_sandbox_and_typed_cleared_offline_environment_to_the_actual_installed_fixed_binary_analyzer_reconstructs_the_exact_retained_tree_from_verified_archive_members_repeats_rustc_--print_sysroot_and_exact_cargo_metadata_--frozen_--offline_--locked_--format-version_1_under_the_same_typed_cleared_environment_working_directory_and_read_sandbox_and_requires_success_the_exact_reported_sysroot_and_the_same_resolved_dependency_graph_before_accepting_the_receipt_stale_extra_ambient_relocated_substituted_unretained_or_differently_built_binary_invalidates_the_campaign".to_owned(),
         source_archive_manifest_schema:
             "marty.performance/sd-jwt-issuance-source-archive-manifest/v1".to_owned(),
         source_archive_manifest_fields: evidence_fields([
@@ -1633,7 +1640,7 @@ fn global_preimage_protocol() -> SdJwtIssuanceGlobalPreimageProtocol {
         maximum_source_archive_derived_component_bytes:
             MAX_SOURCE_ARCHIVE_DERIVED_COMPONENT_BYTES,
         source_archive_format: "one_exact_source/exact-tree.sar_binary_stream_beginning_with_exact_ASCII_bytes_MARTY-SD-JWT-SOURCE-ARCHIVE-V1_plus_LF_then_unsigned_64_bit_big_endian_manifest_byte_length_including_its_terminal_LF_then_exact_canonical_pretty_JSON_plus_LF_manifest_bytes_then_unsigned_64_bit_big_endian_raw_commit_content_length_then_exact_raw_Git_commit_content_then_for_each_manifest_entry_in_order_one_unsigned_64_bit_big_endian_content_length_and_exact_regular_file_bytes_then_immediate_EOF_no_alignment_padding_unused_header_metadata_or_trailing_byte_analyzer_reads_at_most_hardcoded_16777216_plus_one_into_one_bounded_immutable_buffer_verifies_the_outer_archive_fingerprint_before_any_UTF8_or_JSON_parse_then_parses_that_same_buffer_every_u64_length_uses_checked_conversion_and_subtraction_and_must_fit_remaining_bytes_and_its_4194304_manifest_1048576_commit_or_remaining_archive_cap_before_allocation".to_owned(),
-        source_archive_rule: "manifest_schema_and_fields_are_exact_git_object_format_equals_sha1_source_commit_and_source_tree_are_40_lowercase_hex_entry_count_equals_entries_length_and_is_1_through_65536_repository_relative_paths_use_the_portable_ASCII_grammar_bytes_A_to_Z_a_to_z_0_to_9_dot_underscore_at_plus_hyphen_preserved_byte-for-byte_1_through_1024_bytes_with_1_through_256_forward-slash-separated_segments_each_1_through_255_bytes_no_component_ASCII-case-folds_to_exact_.git_and_no_absolute_drive_ADS_empty_dot_dotdot_backslash_control_trailing_dot_or_Windows_reserved_device_segment_entries_are_strictly_ascending_by_unsigned_bytes_and_a_single_bounded_component_trie_rejects_file_or_directory_duplicates_ASCII_case-fold_aliases_at_every_component_and_file-directory_prefix_conflicts_derived_directory_node_count_is_at_most_131072_and_checked_sum_of_each_cloned_unique_directory_or_file_component_byte_length_is_at_most_4194304_secure_materialization_uses_create-new_directory-handle-relative_no-follow_opens_verifies_every_opened_handle_remains_beneath_the_empty_build_root_and_rejects_any_target-filesystem_lossy_round_trip_case_fold_normalization_or_other_alias_collision_git_mode_is_exactly_100644_or_100755_git_object_id_is_40_lowercase_hex_SHA1_and_matches_Git_blob_header_plus_the_corresponding_length-prefixed_file_bytes_each_SHA256_and_length_fingerprint_matches_those_file_bytes_archive_has_no_extra_duplicate_link_device_ref_reflog_config_remote_hook_credential_parent-commit_or_history-object_record_while_parent_identifiers_inside_the_retained_commit_are_allowed_analyzer_builds_the_bounded_parent-to-children_trie_in_one_path_pass_hashes_each_node_once_in_reverse_creation_order_using_canonical_Git_tree_entry_order_and_recomputes_every_intermediate_tree_and_root_source_tree_without_recursion_quadratic_prefix_scans_or_unbounded_derived_strings_parses_only_the_header_prefix_of_the_sole_raw_commit_bytewise_while_leaving_identity_encoding_headers_and_message_bytes_opaque_recomputes_the_complete_unchanged_raw_Git_object_ID_as_source_commit_requires_exactly_one_first_ASCII_tree_header_equal_source_tree_and_exactly_one_committer_header_whose_final_ASCII_tokens_are_a_nonnegative_no-leading-zero_u64_Unix_timestamp_and_valid_plus-or-minus_HHMM_offset_that_define_SOURCE_DATE_EPOCH_missing_duplicate_malformed_or_negative_committer_time_rejects_and_requires_inputs/Cargo.lock_bytes_equal_the_archive_entry_for_Cargo.lock_controller_configuration_source_export_approved_must_be_true".to_owned(),
+        source_archive_rule: "manifest_schema_and_fields_are_exact_git_object_format_equals_sha1_source_commit_and_source_tree_are_40_lowercase_hex_entry_count_equals_entries_length_and_is_1_through_65536_repository_relative_paths_use_the_portable_ASCII_grammar_bytes_A_to_Z_a_to_z_0_to_9_dot_underscore_at_plus_hyphen_preserved_byte-for-byte_1_through_1024_bytes_with_1_through_256_forward-slash-separated_segments_each_1_through_255_bytes_no_component_ASCII-case-folds_to_exact_.git_or_.cargo_and_no_absolute_drive_ADS_empty_dot_dotdot_backslash_control_trailing_dot_or_Windows_reserved_device_segment_entries_are_strictly_ascending_by_unsigned_bytes_and_a_single_bounded_component_trie_rejects_file_or_directory_duplicates_ASCII_case-fold_aliases_at_every_component_and_file-directory_prefix_conflicts_derived_directory_node_count_is_at_most_131072_and_checked_sum_of_each_cloned_unique_directory_or_file_component_byte_length_is_at_most_4194304_secure_materialization_uses_create-new_directory-handle-relative_no-follow_opens_verifies_every_opened_handle_remains_beneath_the_empty_build_root_and_rejects_any_target-filesystem_lossy_round_trip_case_fold_normalization_or_other_alias_collision_git_mode_is_exactly_100644_or_100755_git_object_id_is_40_lowercase_hex_SHA1_and_matches_Git_blob_header_plus_the_corresponding_length-prefixed_file_bytes_each_SHA256_and_length_fingerprint_matches_those_file_bytes_archive_has_no_extra_duplicate_link_device_ref_reflog_config_remote_hook_credential_parent-commit_or_history-object_record_while_parent_identifiers_inside_the_retained_commit_are_allowed_analyzer_builds_the_bounded_parent-to-children_trie_in_one_path_pass_hashes_each_node_once_in_reverse_creation_order_using_canonical_Git_tree_entry_order_and_recomputes_every_intermediate_tree_and_root_source_tree_without_recursion_quadratic_prefix_scans_or_unbounded_derived_strings_parses_only_the_header_prefix_of_the_sole_raw_commit_bytewise_while_leaving_identity_encoding_headers_and_message_bytes_opaque_recomputes_the_complete_unchanged_raw_Git_object_ID_as_source_commit_requires_exactly_one_first_ASCII_tree_header_equal_source_tree_and_exactly_one_committer_header_whose_final_ASCII_tokens_are_a_nonnegative_no-leading-zero_u64_Unix_timestamp_and_valid_plus-or-minus_HHMM_offset_that_define_SOURCE_DATE_EPOCH_missing_duplicate_malformed_or_negative_committer_time_rejects_and_requires_inputs/Cargo.lock_bytes_equal_the_archive_entry_for_Cargo.lock_controller_configuration_source_export_approved_must_be_true".to_owned(),
         privacy_rule: "all_operational_typed_preimages_use_deny_unknown_fields_exact_literal_domains_and_bounded_string_grammars_and_retain_no_raw_or_unsalted_digest_of_hostname_machine_or_boot_ID_username_account_IP_MAC_serial_cloud_instance_ID_PID_process_start_time_image_name_executable_or_account_home_path_command_line_target_origin_endpoint_change_ticket_access_credential_secret_token_private_key_or_unbounded_or_untyped_free_form_diagnostic_text_campaign_ephemeral_identity_keys_and_raw_inputs_are_memory_only_and_destroyed_after_completion_the_fixed_nonpersonal_build_root_exact_staged_Windows_runtime_paths_bounded_typed_hardware_source_commit_toolchain_and_binary_fingerprints_anchor_channel_log_key_IDs_and_authenticated_timestamps_are_explicit_nonsecret_stable-metadata_exceptions_and_can_link_campaigns_the_retained_build_input_archive_is_a_separate_explicit_exception_limited_to_approved_public_dependency_Cargo_configuration_toolchain_linker_archiver_dynamic_runtime_and_staged_Windows_runtime_bytes_and_portable_nonpersonal_paths_and_must_contain_no_credential_private_source_secret_or_operational_capture_data_source_archive_bytes_are_another_explicit_exception_because_the_export_approved_exact_source_commit_can_intentionally_contain_repository_relative_paths_public_URLs_author_and_committer_metadata_and_timestamps_parent_identifiers_and_public_synthetic_test_key_material_but_no_extra_history_objects_or_operational_capture_data_child_output_after_ready_is_bounded_drained_and_discarded_and_only_counts_are_retained".to_owned(),
     }
 }
@@ -2417,6 +2424,9 @@ fn valid_source_archive_path(path: &str) -> bool {
             let segments = path.split('/').collect::<Vec<_>>();
             u32::try_from(segments.len()).is_ok_and(|count| {
                 count <= MAX_SOURCE_ARCHIVE_PATH_SEGMENTS
+                    && segments
+                        .iter()
+                        .all(|segment| !segment.eq_ignore_ascii_case(".cargo"))
                     && segments.into_iter().all(valid_source_archive_segment)
             })
         }
@@ -4029,6 +4039,8 @@ struct IssuanceAnalysisReport {
 fn concrete_target_linker_environment_name(target_triple: &str) -> Option<String> {
     if target_triple.is_empty()
         || target_triple.len() > 128
+        || matches!(target_triple, "." | ".." | "host-tuple")
+        || target_triple.to_ascii_lowercase().ends_with(".json")
         || !target_triple
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -4053,12 +4065,31 @@ fn canonical_build_environment(
     target_triple: &str,
     committer_timestamp: u64,
     target_linker_relative_path: &str,
+    target_archiver_relative_path: &str,
 ) -> Option<Vec<BuildEnvironmentEntry>> {
     let root = if windows {
         FIXED_BUILD_ROOT_WINDOWS
     } else {
         FIXED_BUILD_ROOT_NON_WINDOWS
     };
+    canonical_build_environment_at_root(
+        root,
+        windows,
+        target_triple,
+        committer_timestamp,
+        target_linker_relative_path,
+        target_archiver_relative_path,
+    )
+}
+
+fn canonical_build_environment_at_root(
+    root: &str,
+    windows: bool,
+    target_triple: &str,
+    committer_timestamp: u64,
+    target_linker_relative_path: &str,
+    target_archiver_relative_path: &str,
+) -> Option<Vec<BuildEnvironmentEntry>> {
     let separator = if windows { ";" } else { ":" };
     let executable_directories = [
         "toolchain/bin",
@@ -4074,8 +4105,14 @@ fn canonical_build_environment(
         if windows { "rustc.exe" } else { "rustc" }
     );
     let linker = format!("{root}/inputs/{target_linker_relative_path}");
+    let archiver = format!("{root}/inputs/{target_archiver_relative_path}");
     let linker_name = concrete_target_linker_environment_name(target_triple)?;
     let mut entries = vec![
+        BuildEnvironmentEntry {
+            name: "AR".to_owned(),
+            value_kind: "inventoried_absolute_path".to_owned(),
+            resolved_value: archiver,
+        },
         BuildEnvironmentEntry {
             name: "CARGO_HOME".to_owned(),
             value_kind: "canonical_absolute_path".to_owned(),
@@ -4152,12 +4189,14 @@ fn valid_build_environment(
     target_triple: &str,
     committer_timestamp: u64,
     target_linker_relative_path: &str,
+    target_archiver_relative_path: &str,
 ) -> bool {
     canonical_build_environment(
         windows,
         target_triple,
         committer_timestamp,
         target_linker_relative_path,
+        target_archiver_relative_path,
     )
     .is_some_and(|expected| entries == expected)
 }
@@ -4323,6 +4362,7 @@ fn valid_build_input_inventory(
             .filter(|entry| entry.role == role)
             .count()
     };
+    let exact_cargo_configuration = fingerprint(FIXED_CARGO_CONFIGURATION_BYTES).ok();
     inventory.schema == "marty.performance/sd-jwt-issuance-fixed-build-input-inventory/v2"
         && inventory.campaign_id == expected_campaign_id
         && inventory.target_triple == expected_target_triple
@@ -4349,6 +4389,8 @@ fn valid_build_input_inventory(
             build_input_path_matches_role(entry, windows)
                 && build_input_mode_matches_role(entry)
                 && valid_artifact_fingerprint(&entry.fingerprint)
+                && (entry.role != "cargo_configuration"
+                    || exact_cargo_configuration.as_ref() == Some(&entry.fingerprint))
         })
         && EXACTLY_ONE.iter().all(|role| count_role(role) == 1)
         && count_role("rustc_sysroot_file") >= 1
@@ -4385,12 +4427,21 @@ fn valid_build_layout(
     else {
         return false;
     };
+    let Some(target_archiver_relative_path) = inventory
+        .entries
+        .iter()
+        .find(|entry| entry.role == "target_archiver_executable")
+        .map(|entry| entry.relative_path.as_str())
+    else {
+        return false;
+    };
     if !valid_build_environment(
         environment,
         windows,
         target_triple,
         committer_timestamp,
         target_linker_relative_path,
+        target_archiver_relative_path,
     ) {
         return false;
     }
@@ -5132,7 +5183,22 @@ fn validate_build_input_archive_stream(
             length == entry.fingerprint.byte_length,
             "analysis rejected: build-input archive"
         );
-        let member = hash_exact_member(&mut reader, length, "build-input archive")?;
+        let member = if entry.role == "cargo_configuration" {
+            anyhow::ensure!(
+                entry.relative_path == "cargo-home/config.toml"
+                    && length == u64::try_from(FIXED_CARGO_CONFIGURATION_BYTES.len())?,
+                "analysis rejected: build-input archive"
+            );
+            let mut exact = vec![0_u8; FIXED_CARGO_CONFIGURATION_BYTES.len()];
+            read_exact_role(&mut reader, &mut exact, "build-input archive")?;
+            anyhow::ensure!(
+                exact == FIXED_CARGO_CONFIGURATION_BYTES,
+                "analysis rejected: build-input archive"
+            );
+            fingerprint(&exact).context("analysis rejected: build-input archive")?
+        } else {
+            hash_exact_member(&mut reader, length, "build-input archive")?
+        };
         anyhow::ensure!(
             member == entry.fingerprint,
             "analysis rejected: build-input archive"
@@ -7287,10 +7353,10 @@ mod tests {
         let plan = plan_for_manifest(&value, &manifest_bytes).expect("valid qualification plan");
         let mut plan_bytes = serde_json::to_vec_pretty(&plan).expect("canonical plan JSON");
         plan_bytes.push(b'\n');
-        assert_eq!(plan_bytes.len(), 152_138);
+        assert_eq!(plan_bytes.len(), 153_630);
         assert_eq!(
             hex::encode_upper(Sha256::digest(&plan_bytes)),
-            "4BE955DF8371FF4790C8876397162D1ACEC1DC6EF190E65F7281831FF22C2C91"
+            "F077688B5586EEABD1ADD1F8980022CE352406E8278638C04547732DD582641A"
         );
     }
 
@@ -8545,6 +8611,8 @@ mod tests {
     fn concrete_target_linker_environment_name(target_triple: &str) -> Option<String> {
         if target_triple.is_empty()
             || target_triple.len() > 128
+            || matches!(target_triple, "." | ".." | "host-tuple")
+            || target_triple.to_ascii_lowercase().ends_with(".json")
             || !target_triple
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -8569,6 +8637,14 @@ mod tests {
             "tools/linker/link.exe"
         } else {
             "tools/linker/cc"
+        }
+    }
+
+    fn fixture_target_archiver_relative_path(windows: bool) -> &'static str {
+        if windows {
+            "tools/archiver/lib.exe"
+        } else {
+            "tools/archiver/ar"
         }
     }
 
@@ -8598,8 +8674,17 @@ mod tests {
             if windows { "rustc.exe" } else { "rustc" }
         );
         let linker = format!("{root}/inputs/{target_linker_relative_path}");
+        let archiver = format!(
+            "{root}/inputs/{}",
+            fixture_target_archiver_relative_path(windows)
+        );
         let linker_name = concrete_target_linker_environment_name(target_triple)?;
         let mut entries = vec![
+            BuildEnvironmentEntry {
+                name: "AR".to_owned(),
+                value_kind: "inventoried_absolute_path".to_owned(),
+                resolved_value: archiver,
+            },
             BuildEnvironmentEntry {
                 name: "CARGO_HOME".to_owned(),
                 value_kind: "canonical_absolute_path".to_owned(),
@@ -8816,6 +8901,17 @@ mod tests {
         file_mode: &str,
         byte_length: u64,
     ) -> BuildInputEntry {
+        if role == "cargo_configuration"
+            && path == "cargo-home/config.toml"
+            && byte_length == u64::try_from(FIXED_CARGO_CONFIGURATION_BYTES.len()).unwrap()
+        {
+            return BuildInputEntry {
+                role: role.to_owned(),
+                relative_path: path.to_owned(),
+                file_mode: file_mode.to_owned(),
+                fingerprint: fingerprint(FIXED_CARGO_CONFIGURATION_BYTES).unwrap(),
+            };
+        }
         let mut hasher = Sha256::new();
         hasher.update(b"marty.synthetic-build-input-projection.v1\0");
         hasher.update(role.as_bytes());
@@ -8838,7 +8934,12 @@ mod tests {
         path: &str,
         file_mode: &str,
     ) -> super::BuildInputEntry {
-        let entry = build_input_entry(role, path, file_mode, 1);
+        let length = if role == "cargo_configuration" {
+            u64::try_from(FIXED_CARGO_CONFIGURATION_BYTES.len()).unwrap()
+        } else {
+            1
+        };
+        let entry = build_input_entry(role, path, file_mode, length);
         super::BuildInputEntry {
             role: entry.role,
             relative_path: entry.relative_path,
@@ -8853,7 +8954,7 @@ mod tests {
                 "cargo_configuration",
                 "cargo-home/config.toml",
                 "100644",
-                4_096,
+                u64::try_from(FIXED_CARGO_CONFIGURATION_BYTES.len()).unwrap(),
             ),
             build_input_entry(
                 "cargo_dependency_source",
@@ -9061,7 +9162,7 @@ mod tests {
         archive: Vec<u8>,
     }
 
-    const GOLDEN_RETAINED_CARGO_CONFIG: &[u8] = b"[build]\ntarget-dir = \"retained-target\"\n";
+    const GOLDEN_RETAINED_CARGO_CONFIG: &[u8] = FIXED_CARGO_CONFIGURATION_BYTES;
 
     fn golden_build_input_archive_fixture() -> GoldenBuildInputArchiveFixture {
         let mut members = [
@@ -9216,7 +9317,11 @@ mod tests {
             assert!(rejected(&changed));
         }
         let mut wrong_name = environment.to_vec();
-        wrong_name[4].name = "CARGO_TARGET_{TARGET_TRIPLE_ENV}_LINKER".to_owned();
+        wrong_name
+            .iter_mut()
+            .find(|entry| entry.name.ends_with("_LINKER"))
+            .unwrap()
+            .name = "CARGO_TARGET_{TARGET_TRIPLE_ENV}_LINKER".to_owned();
         assert!(rejected(&wrong_name));
         let mut wrong_kind = environment.to_vec();
         wrong_kind[0].value_kind = "literal".to_owned();
@@ -9240,6 +9345,10 @@ mod tests {
         assert!(rejected(&zero_epoch));
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the coupled protocol and canonical-vector assertions are deliberately kept together"
+    )]
     fn assert_build_environment_vector(
         windows: bool,
         target_triple: &str,
@@ -9261,24 +9370,85 @@ mod tests {
             COMMITTER_TIMESTAMP,
             target_linker_relative_path,
         ));
-        assert_eq!(environment[4].name, exact_linker_name);
-        assert!(!environment[4].name.contains(['{', '}', '<', '>']));
+        assert_eq!(environment[5].name, exact_linker_name);
+        assert!(!environment[5].name.contains(['{', '}', '<', '>']));
         let root = if windows {
             FIXED_BUILD_ROOT_WINDOWS
         } else {
             FIXED_BUILD_ROOT_NON_WINDOWS
         };
+        assert_eq!(environment[0].name, "AR");
         assert_eq!(
             environment[0].resolved_value,
+            format!(
+                "{root}/inputs/{}",
+                fixture_target_archiver_relative_path(windows)
+            )
+        );
+        assert_eq!(
+            environment[1].resolved_value,
             format!("{root}/inputs/cargo-home")
         );
         assert_eq!(
-            environment[6].resolved_value,
+            environment[7].resolved_value,
             format!(
                 "{root}/inputs/toolchain/bin/{}",
                 if windows { "rustc.exe" } else { "rustc" }
             )
         );
+        let expected_names = fixed_build_environment_allowlist()
+            .into_iter()
+            .filter(|name| windows || !matches!(name.as_str(), "SystemRoot" | "WINDIR"))
+            .map(|name| {
+                if name == "CARGO_TARGET_<TARGET_TRIPLE_ENV>_LINKER" {
+                    exact_linker_name.to_owned()
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            environment
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+        let protocol = run_validity_protocol();
+        assert_eq!(
+            protocol
+                .global_preimages
+                .fixed_binary_build_environment_allowlist,
+            [
+                "AR",
+                "CARGO_HOME",
+                "CARGO_INCREMENTAL",
+                "CARGO_NET_OFFLINE",
+                "CARGO_TARGET_DIR",
+                "CARGO_TARGET_<TARGET_TRIPLE_ENV>_LINKER",
+                "PATH",
+                "RUSTC",
+                "SOURCE_DATE_EPOCH",
+                "SystemRoot",
+                "TEMP",
+                "TMP",
+                "WINDIR",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        );
+        let rule = &protocol
+            .global_preimages
+            .fixed_binary_build_environment_mapping_rule;
+        assert!(rule.contains(
+            "AR_inventoried_absolute_path_is_the_unique_target_archiver_member_below_ROOT/inputs/tools/archiver"
+        ));
+        assert!(rule.contains(if windows {
+            "Windows_has_exactly_13"
+        } else {
+            "non-Windows_has_exactly_11"
+        }));
+        assert_eq!(environment.len(), if windows { 13 } else { 11 });
         assert_build_environment_mutations_reject(
             &environment,
             windows,
@@ -9288,7 +9458,81 @@ mod tests {
         );
     }
 
+    fn assert_production_build_environment_mutations_reject(windows: bool, target_triple: &str) {
+        const COMMITTER_TIMESTAMP: u64 = 1_700_000_123;
+        let linker = fixture_target_linker_relative_path(windows);
+        let archiver = fixture_target_archiver_relative_path(windows);
+        let environment = super::canonical_build_environment(
+            windows,
+            target_triple,
+            COMMITTER_TIMESTAMP,
+            linker,
+            archiver,
+        )
+        .unwrap();
+        let rejected = |changed: &[super::BuildEnvironmentEntry]| {
+            !super::valid_build_environment(
+                changed,
+                windows,
+                target_triple,
+                COMMITTER_TIMESTAMP,
+                linker,
+                archiver,
+            )
+        };
+        for index in 0..environment.len() {
+            let mut changed_name = environment.clone();
+            changed_name[index].name.push_str("_MUTATED");
+            assert!(rejected(&changed_name), "name mutation {index}");
+
+            let mut changed_kind = environment.clone();
+            changed_kind[index].value_kind.push_str("_mutated");
+            assert!(rejected(&changed_kind), "kind mutation {index}");
+
+            let mut changed_value = environment.clone();
+            changed_value[index].resolved_value.push_str("-mutated");
+            assert!(rejected(&changed_value), "value mutation {index}");
+
+            let mut deleted = environment.clone();
+            deleted.remove(index);
+            assert!(rejected(&deleted), "deletion {index}");
+
+            let mut duplicated = environment.clone();
+            duplicated.insert(index, environment[index].clone());
+            assert!(rejected(&duplicated), "duplicate {index}");
+
+            let mut case_alias = environment.clone();
+            let mut alias = environment[index].clone();
+            let letter = alias
+                .name
+                .find(char::is_alphabetic)
+                .expect("environment names contain ASCII letters");
+            let original = alias.name.as_bytes()[letter];
+            let replacement = if original.is_ascii_lowercase() {
+                original.to_ascii_uppercase()
+            } else {
+                original.to_ascii_lowercase()
+            };
+            alias.name.replace_range(
+                letter..=letter,
+                std::str::from_utf8(&[replacement]).unwrap(),
+            );
+            let mut replaced_by_case_alias = environment.clone();
+            replaced_by_case_alias[index] = alias.clone();
+            assert!(
+                rejected(&replaced_by_case_alias),
+                "case-only name mutation {index}"
+            );
+            case_alias.insert(index, alias);
+            assert!(rejected(&case_alias), "case alias {index}");
+        }
+    }
+
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exact protocol, target grammar, and inventory assertions form one frozen contract"
+    )]
     fn fixed_build_environment_and_input_inventory_are_exact() {
         const COMMITTER_TIMESTAMP: u64 = 1_700_000_123;
         assert_build_environment_vector(
@@ -9301,12 +9545,27 @@ mod tests {
             "x86_64-pc-windows-msvc",
             "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
         );
+        assert_production_build_environment_mutations_reject(false, "x86_64-unknown-linux-gnu");
+        assert_production_build_environment_mutations_reject(true, "x86_64-pc-windows-msvc");
         assert_eq!(
             concrete_target_linker_environment_name("a.b_c-d9").as_deref(),
             Some("CARGO_TARGET_A_B_C_D9_LINKER")
         );
-        for invalid in ["", "a/b", "a+b", "a b", "a{b"] {
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "host-tuple",
+            "target.json",
+            "target.JSON",
+            "target.JsOn",
+            "a/b",
+            "a+b",
+            "a b",
+            "a{b",
+        ] {
             assert!(concrete_target_linker_environment_name(invalid).is_none());
+            assert!(super::concrete_target_linker_environment_name(invalid).is_none());
         }
         assert!(concrete_target_linker_environment_name(&"a".repeat(129)).is_none());
         let global = run_validity_protocol().global_preimages;
@@ -9325,7 +9584,8 @@ mod tests {
         );
         for required in [
             "--frozen_--offline",
-            "forces_the_fingerprinted_rustc",
+            "declares_only_execution_intent_for_the_fingerprinted_rustc",
+            "does_not_attest_actual_child_resolution",
             "rejects_RUSTC_WRAPPER",
             "sandboxes_reads_to_worktree",
             "real_prebuild_probe",
@@ -9334,6 +9594,34 @@ mod tests {
                 .fixed_binary_build_receipt
                 .semantic_rule
                 .contains(required));
+        }
+        assert!(!global
+            .fixed_binary_build_receipt
+            .semantic_rule
+            .contains("forces_the_fingerprinted"));
+        assert!(global
+            .source_archive_rule
+            .contains("no_component_ASCII-case-folds_to_exact_.git_or_.cargo"));
+        assert!(global
+            .fixed_binary_build_input_path_rule
+            .contains("exact_ASCII-case-fold_.git_or_.cargo_component_prohibition"));
+        assert!(global.fixed_binary_build_input_role_rule.contains(
+            "exact_bytes_[net]_LFoffline_space_equals_space_true_LF_and_no_other_table_or_field"
+        ));
+        for required in [
+            "is_not_dot_dotdot_host-tuple_or_any_ASCII_case_fold_suffix_.json",
+            "AR_linker_and_PATH_values_are_execution_intent_only",
+        ] {
+            assert!(
+                global.fixed_binary_build_rule.contains(required)
+                    || global
+                        .fixed_binary_build_environment_mapping_rule
+                        .contains(required)
+                    || global
+                        .fixed_binary_build_receipt
+                        .semantic_rule
+                        .contains(required)
+            );
         }
         for required in [
             "analyzer_reconstructs_the_exact_retained_tree",
@@ -9434,8 +9722,68 @@ mod tests {
         assert!(!accepted(&wrong_environment));
     }
 
+    #[cfg(windows)]
+    const SYNTHETIC_CARGO_METADATA_ENVIRONMENT_NAMES: &[&str] =
+        &["CARGO_HOME", "RUSTC", "SystemRoot", "WINDIR"];
+    #[cfg(not(windows))]
+    const SYNTHETIC_CARGO_METADATA_ENVIRONMENT_NAMES: &[&str] = &["CARGO_HOME", "RUSTC"];
+
+    fn assert_ancestor_chain_has_no_cargo_configuration(project: &Path) {
+        for ancestor in project.ancestors() {
+            for relative in [".cargo/config", ".cargo/config.toml"] {
+                let candidate = ancestor.join(relative);
+                match fs::symlink_metadata(&candidate) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!(
+                        "cannot prove synthetic Cargo metadata ancestor is free of {relative}: {}: {error}",
+                        ancestor.display()
+                    ),
+                    Ok(_) => panic!(
+                        "synthetic Cargo metadata ancestor contains {relative}: {}",
+                        ancestor.display()
+                    ),
+                }
+            }
+        }
+    }
+
+    fn synthetic_cargo_metadata_environment(
+        cargo_home: &Path,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let mut environment = vec![(
+            std::ffi::OsString::from("CARGO_HOME"),
+            cargo_home.as_os_str().to_owned(),
+        )];
+        let rustc = Path::new(env!("CARGO")).with_file_name(if cfg!(windows) {
+            "rustc.exe"
+        } else {
+            "rustc"
+        });
+        assert!(rustc.is_absolute() && rustc.is_file());
+        environment.push((std::ffi::OsString::from("RUSTC"), rustc.into_os_string()));
+        #[cfg(windows)]
+        for name in ["SystemRoot", "WINDIR"] {
+            environment.push((
+                std::ffi::OsString::from(name),
+                std::env::var_os(name)
+                    .unwrap_or_else(|| panic!("required Windows process environment {name}")),
+            ));
+        }
+        assert_eq!(
+            environment
+                .iter()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            SYNTHETIC_CARGO_METADATA_ENVIRONMENT_NAMES
+        );
+        environment
+    }
+
     fn synthetic_cargo_metadata_output(project: &Path, cargo_home: &Path) -> std::process::Output {
-        std::process::Command::new(env!("CARGO"))
+        assert_ancestor_chain_has_no_cargo_configuration(project);
+        let environment = synthetic_cargo_metadata_environment(cargo_home);
+        let mut command = std::process::Command::new(env!("CARGO"));
+        command
             .args([
                 "metadata",
                 "--frozen",
@@ -9445,14 +9793,9 @@ mod tests {
                 "1",
             ])
             .current_dir(project)
-            .env("CARGO_HOME", cargo_home)
-            .env_remove("CARGO_BUILD_TARGET")
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("CARGO_TARGET_DIR")
-            .env_remove("RUSTC")
-            .env_remove("RUSTC_WORKSPACE_WRAPPER")
-            .env_remove("RUSTC_WRAPPER")
-            .env_remove("RUSTFLAGS")
+            .env_clear()
+            .envs(environment);
+        command
             .output()
             .expect("run synthetic offline Cargo metadata fixture")
     }
@@ -9506,9 +9849,17 @@ mod tests {
             config_entry.fingerprint
         );
         fs::write(cargo_home.join("config.toml"), retained_config).unwrap();
+        assert_ancestor_chain_has_no_cargo_configuration(&project);
+        assert_eq!(
+            synthetic_cargo_metadata_environment(&cargo_home)
+                .iter()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            SYNTHETIC_CARGO_METADATA_ENVIRONMENT_NAMES
+        );
         assert_eq!(
             run_synthetic_cargo_metadata(&project, &cargo_home),
-            temp.path().join("retained-target")
+            project.join("target")
         );
 
         fs::remove_file(cargo_home.join("config.toml")).unwrap();
@@ -9519,6 +9870,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one matrix keeps cross-bound environment and inventory mutations together"
+    )]
     fn fixed_build_layout_couples_environment_to_retained_member_paths() {
         const COMMITTER_TIMESTAMP: u64 = 1_700_000_123;
         for (windows, target_triple) in [
@@ -9584,8 +9939,47 @@ mod tests {
                 &reported_sysroot,
             ));
 
+            let mut alternate_archiver_inventory = inventory.clone();
+            alternate_archiver_inventory
+                .entries
+                .iter_mut()
+                .find(|entry| entry.role == "target_archiver_executable")
+                .unwrap()
+                .relative_path = if windows {
+                "tools/archiver/alternate-lib.exe"
+            } else {
+                "tools/archiver/alternate-ar"
+            }
+            .to_owned();
+            assert!(!valid_build_layout(
+                &environment,
+                &alternate_archiver_inventory,
+                windows,
+                target_triple,
+                COMMITTER_TIMESTAMP,
+                &reported_sysroot,
+            ));
+            let mut path_substitution = environment.clone();
+            path_substitution
+                .iter_mut()
+                .find(|entry| entry.name == "PATH")
+                .unwrap()
+                .resolved_value = format!("{root}/inputs/tools/archiver");
+            assert!(!valid_build_layout(
+                &path_substitution,
+                &inventory,
+                windows,
+                target_triple,
+                COMMITTER_TIMESTAMP,
+                &reported_sysroot,
+            ));
+
             let mut disconnected_cargo_home = environment.clone();
-            disconnected_cargo_home[0].resolved_value = format!("{root}/cargo-home");
+            disconnected_cargo_home
+                .iter_mut()
+                .find(|entry| entry.name == "CARGO_HOME")
+                .unwrap()
+                .resolved_value = format!("{root}/cargo-home");
             assert!(!valid_build_layout(
                 &disconnected_cargo_home,
                 &inventory,
@@ -9707,9 +10101,9 @@ mod tests {
         assert_eq!(
             inventory.total_byte_length,
             if windows {
-                1_673_583_295
+                1_673_579_220
             } else {
-                1_463_868_095
+                1_463_864_020
             }
         );
         assert!(inventory.total_byte_length <= MAX_FIXED_BUILD_INPUT_BYTES);
@@ -10063,8 +10457,8 @@ mod tests {
                 "cargo_configuration",
                 "cargo-home/config.toml",
                 "100644",
-                39,
-                "C2908B2E3F2AF915DA9B6785B662E77DBD9F8FD33E89F23C384FC056E6D633F6",
+                21,
+                "E3987C0B3CE7C845D7C8DABD72BF638678FFC481ABBD446418E4668D0E248A7E",
             ),
             (
                 "cargo_dependency_source",
@@ -10138,8 +10532,8 @@ mod tests {
                 fixture.inventory_fingerprint.sha256.as_str(),
             ),
             (
-                2_702,
-                "478B3DE94CB986562B9D27CBF3BCCEAB07CAEADB219ACF23676C295D739DCA46",
+                2_701,
+                "1666CD0A13CF229402130778ACCC69951623A1768420EDA0B97B7BAD876ABF66",
             )
         );
     }
@@ -10265,6 +10659,63 @@ mod tests {
         ));
     }
 
+    fn assert_fully_rebound_cargo_configuration_overrides_reject(
+        fixture: &GoldenBuildInputArchiveFixture,
+        target_triple: &str,
+    ) {
+        let configuration_position = fixture
+            .inventory
+            .entries
+            .iter()
+            .position(|entry| entry.role == "cargo_configuration")
+            .unwrap();
+        let malicious = [
+            // Same-length edit, delete, and append cover framing-preserving and resizing changes.
+            b"[net]\noffline = TRUE\n".as_slice(),
+            b"[net]\n".as_slice(),
+            b"[net]\noffline = true\n#".as_slice(),
+            b"include = 'evil.toml'\n".as_slice(),
+            b"[build]\nrustc-wrapper = 'evil'\n".as_slice(),
+            b"[build]\nrustflags = ['-C', 'linker=evil']\n".as_slice(),
+            b"[env]\nAR = 'evil'\n".as_slice(),
+            b"[env]\nCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu]\nlinker = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu]\nar = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu]\nrunner = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu.env]\nAR = 'evil'\n".as_slice(),
+        ];
+        for bytes in malicious {
+            let mut contents = fixture.contents.clone();
+            contents[configuration_position] = bytes.to_vec();
+            let member_fingerprint = source_archive_fingerprint(bytes);
+            let archive = encode_build_input_archive(&contents);
+            let archive_fingerprint = source_archive_fingerprint(&archive);
+            let mut inventory = fixture.inventory.clone();
+            inventory.entries[configuration_position].fingerprint = member_fingerprint.clone();
+            inventory.archive_fingerprint = archive_fingerprint.clone();
+            refresh_build_input_inventory_projection(&mut inventory);
+            let inventory_bytes = canonical_build_input_inventory_bytes(&inventory);
+            let inventory_fingerprint = source_archive_fingerprint(&inventory_bytes);
+            assert_eq!(
+                inventory.entries[configuration_position].fingerprint,
+                member_fingerprint
+            );
+            assert_eq!(inventory.archive_fingerprint, archive_fingerprint);
+            assert_eq!(
+                inventory_fingerprint,
+                source_archive_fingerprint(&inventory_bytes)
+            );
+            assert!(!valid_build_input_archive_bytes(
+                &archive,
+                &inventory,
+                &inventory_fingerprint,
+                &archive_fingerprint,
+                false,
+                target_triple,
+            ));
+        }
+    }
+
     #[test]
     fn fixed_build_input_archive_binds_exact_members_modes_and_inventory() {
         let fixture = golden_build_input_archive_fixture();
@@ -10277,8 +10728,8 @@ mod tests {
             false,
             target_triple,
         ));
-        assert_eq!(fixture.inventory.total_byte_length, 100);
-        assert_eq!(fixture.archive.len(), 200);
+        assert_eq!(fixture.inventory.total_byte_length, 82);
+        assert_eq!(fixture.archive.len(), 182);
         assert_literal_build_input_members(&fixture);
         assert_literal_build_input_inventory_fingerprint(&fixture);
         assert!(build_input_archive_length_is_valid(
@@ -10289,11 +10740,12 @@ mod tests {
         ));
         assert_eq!(
             fixture.inventory.archive_fingerprint.sha256,
-            "898733B52DD5A5F6CA5AD21A62D0C5CF60124C620C7363658D94A4A99C9912C1"
+            "AD0DCBC0A68712A3FD75FF88689F6BFA03F23BE678C6B57F349B03404B2FB57F"
         );
         assert_build_archive_member_mutations(&fixture, target_triple);
         assert_build_input_inventory_fingerprint_mutations(&fixture, target_triple);
         assert_malformed_build_input_archives_reject(&fixture, target_triple);
+        assert_fully_rebound_cargo_configuration_overrides_reject(&fixture, target_triple);
 
         let wrong_outer = ArtifactFingerprint {
             sha256: "0".repeat(64),
@@ -11116,6 +11568,18 @@ mod tests {
             &source_archive_fingerprint(&archive),
             &fixture.cargo_lock_fingerprint
         ));
+    }
+
+    #[test]
+    fn source_archive_rejects_root_nested_and_case_folded_cargo_configuration_paths() {
+        for path in [
+            ".cargo/config.toml",
+            "nested/.Cargo/config",
+            "crate/.CARGO/config.toml",
+        ] {
+            assert!(!valid_source_archive_path(path));
+        }
+        assert!(valid_source_archive_path("src/cargo/config.rs"));
     }
 
     #[test]
@@ -12078,6 +12542,7 @@ mod tests {
                 TARGET,
                 1_700_000_123,
                 "tools/linker/cc",
+                "tools/archiver/ar",
             )
             .expect("build environment"),
             offline_dependency_resolution_argv: super::expected_offline_probe_argv(),

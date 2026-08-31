@@ -54,7 +54,7 @@ mod fixed_build;
 mod schedule;
 #[allow(
     dead_code,
-    reason = "the nonactivating retained source-archive capability is future controller plumbing"
+    reason = "the exporter is active while retained source materialization remains future controller plumbing"
 )]
 mod source_archive;
 mod statistics;
@@ -91,6 +91,42 @@ const FIXED_BUILD_ROOT_NON_WINDOWS: &str = "/marty-cdla-build-v1";
 const FIXED_BUILD_INPUT_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-BUILD-INPUT-ARCHIVE-V1\n";
 const FIXED_CARGO_CONFIGURATION_BYTES: &[u8] = b"[net]\noffline = true\n";
 const SOURCE_ARCHIVE_MAGIC: &[u8] = b"MARTY-SD-JWT-SOURCE-ARCHIVE-V1\n";
+
+/// Inputs for one approved, nonactivating exact-source export.
+pub(crate) struct SourceArchiveExportRequest<'a> {
+    /// Absolute root of a normal, clean Git worktree.
+    pub repository: &'a Path,
+    /// Exact lowercase SHA-1 commit object identifier approved for export.
+    pub source_commit: &'a str,
+    /// Exact lowercase SHA-1 tree object identifier approved for export.
+    pub source_tree: &'a str,
+    /// Absolute create-new `source/exact-tree.sar` destination.
+    pub output: &'a Path,
+    /// Explicit controller decision authorizing this source export.
+    pub source_export_approved: bool,
+}
+
+/// Nonqualifying facts returned after an exact-source archive is persisted.
+#[derive(Debug)]
+pub(crate) struct SourceArchiveExportReceipt {
+    /// SHA-256 and length of the complete source archive.
+    pub archive_fingerprint: ArtifactFingerprint,
+    /// Exact exported Git commit object identifier.
+    pub source_commit: String,
+    /// Exact reconstructed Git tree object identifier.
+    pub source_tree: String,
+    /// SHA-256 and length of the exact exported `Cargo.lock` bytes.
+    pub cargo_lock_fingerprint: ArtifactFingerprint,
+    /// Number of regular files exported from the exact tree.
+    pub entry_count: u32,
+}
+
+/// Export one exact Git source tree without creating or qualifying a campaign.
+pub(crate) fn export_source_archive(
+    request: &SourceArchiveExportRequest<'_>,
+) -> Result<SourceArchiveExportReceipt> {
+    source_archive::export_exact_source_archive(request)
+}
 
 pub(crate) fn write_plan(manifest_path: &Path, output_path: &Path) -> Result<()> {
     anyhow::ensure!(

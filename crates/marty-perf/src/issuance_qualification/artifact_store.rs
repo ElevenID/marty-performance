@@ -19,11 +19,12 @@ use super::schedule::{ArtifactPath, ArtifactRole, ScheduledProcess};
 use super::{
     ensure_file_unchanged, handle_snapshot, open_absolute_directory, open_child_directory,
     open_child_file, verified_directory_identity, verified_file_snapshot, FileIdentity,
-    FileSnapshot, MAX_FIXED_BUILD_INPUT_BYTES, MAX_SOURCE_ARCHIVE_V1_BYTES,
+    FileSnapshot, OpenedInput, MAX_FIXED_BUILD_INPUT_BYTES, MAX_SOURCE_ARCHIVE_V1_BYTES,
 };
 
 const BUILD_INPUT_ARCHIVE_PATH: &str = "build/input-files.bia";
 const BUILD_INPUT_INVENTORY_PATH: &str = "build/input-inventory.json";
+pub(super) const SOURCE_ARCHIVE_PATH: &str = "source/exact-tree.sar";
 const STREAM_BUFFER_BYTES: usize = 8 * 1024;
 
 const FIXED_DIRECTORIES: &[&str] = &[
@@ -447,6 +448,30 @@ pub(super) struct PersistedBuildInputInventoryBytes {
     fingerprint: ArtifactFingerprint,
 }
 
+struct BoundStreamedWrite {
+    parent: fs::File,
+    parent_identity: FileIdentity,
+    file: fs::File,
+    snapshot: FileSnapshot,
+    fingerprint: ArtifactFingerprint,
+}
+
+/// Store-bound proof that exact source-archive bytes were durably persisted.
+///
+/// The retained root, source directory, and file handles remain bound to their fixed paths. This
+/// capability attests only to create-new persistence, identity, and fingerprinting; source
+/// semantics are validated by the source-archive layer before the capability is exposed.
+pub(super) struct PersistedSourceArchiveBytes {
+    absolute_root: PathBuf,
+    root: fs::File,
+    root_identity: FileIdentity,
+    source_directory: fs::File,
+    source_directory_identity: FileIdentity,
+    file: fs::File,
+    snapshot: FileSnapshot,
+    fingerprint: ArtifactFingerprint,
+}
+
 impl PersistedBuildInputArchiveBytes {
     /// Returns the fingerprint of the durably retained archive bytes.
     pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
@@ -480,6 +505,69 @@ impl PersistedBuildInputInventoryBytes {
     pub(super) fn shares_store_with(&self, archive: &PersistedBuildInputArchiveBytes) -> bool {
         self.root_identity == archive.root_identity
             && self.snapshot.identity != archive.snapshot.identity
+    }
+}
+
+impl PersistedSourceArchiveBytes {
+    /// Returns the fingerprint of the exact durably retained source-archive bytes.
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    fn verify_root_binding(&self) -> Result<()> {
+        anyhow::ensure!(
+            verified_directory_identity(&self.root, "source archive root")? == self.root_identity,
+            "source archive root changed"
+        );
+        let reopened = open_absolute_directory(&self.absolute_root, "source archive root")?;
+        anyhow::ensure!(
+            verified_directory_identity(&reopened, "source archive root")? == self.root_identity,
+            "source archive root binding changed"
+        );
+        Ok(())
+    }
+
+    fn reopen_bound_file(&self) -> Result<OpenedInput> {
+        self.verify_root_binding()?;
+        anyhow::ensure!(
+            verified_directory_identity(&self.source_directory, "source archive directory")?
+                == self.source_directory_identity,
+            "source archive directory changed"
+        );
+        let source = open_child_directory(
+            &self.root,
+            &OsString::from("source"),
+            "source archive directory",
+        )?;
+        anyhow::ensure!(
+            verified_directory_identity(&source, "source archive directory")?
+                == self.source_directory_identity,
+            "source archive directory binding changed"
+        );
+        let opened = open_child_file(
+            &source,
+            std::ffi::OsStr::new("exact-tree.sar"),
+            MAX_SOURCE_ARCHIVE_V1_BYTES,
+            "source archive",
+        )?;
+        anyhow::ensure!(
+            opened.snapshot == self.snapshot,
+            "source archive file binding changed"
+        );
+        Ok(opened)
+    }
+
+    /// Reopens the fixed role and rehashes the same immutable file through a snapshot sandwich.
+    pub(super) fn ensure_unchanged(&self) -> Result<()> {
+        let mut reopened = self.reopen_bound_file()?;
+        ensure_file_unchanged(&self.file, self.snapshot, "source archive")?;
+        let actual = fingerprint_exact_source(&mut reopened.file, self.snapshot.byte_length)?;
+        anyhow::ensure!(actual == self.fingerprint, "source archive changed");
+        ensure_file_unchanged(&reopened.file, self.snapshot, "source archive")?;
+        ensure_file_unchanged(&self.file, self.snapshot, "source archive")?;
+        self.verify_root_binding()?;
+        let final_reopen = self.reopen_bound_file()?;
+        ensure_file_unchanged(&final_reopen.file, self.snapshot, "source archive")
     }
 }
 
@@ -527,7 +615,12 @@ impl CampaignArtifactStore {
         emit: impl FnOnce(&mut dyn Write) -> Result<()>,
     ) -> Result<PersistedBuildInputArchiveBytes> {
         let path = ArtifactPath::canonical(BUILD_INPUT_ARCHIVE_PATH.into())?;
-        let (file, snapshot, fingerprint) = self.write_streamed_create_new(
+        let BoundStreamedWrite {
+            file,
+            snapshot,
+            fingerprint,
+            ..
+        } = self.write_streamed_create_new(
             &path,
             expected_length,
             MAX_FIXED_BUILD_INPUT_BYTES,
@@ -547,7 +640,12 @@ impl CampaignArtifactStore {
     ) -> Result<PersistedBuildInputInventoryBytes> {
         let path = ArtifactPath::canonical(BUILD_INPUT_INVENTORY_PATH.into())?;
         let expected_length = u64::try_from(bytes.len()).context("artifact length overflow")?;
-        let (file, snapshot, fingerprint) = self.write_streamed_create_new(
+        let BoundStreamedWrite {
+            file,
+            snapshot,
+            fingerprint,
+            ..
+        } = self.write_streamed_create_new(
             &path,
             expected_length,
             MAX_SOURCE_ARCHIVE_V1_BYTES,
@@ -562,6 +660,65 @@ impl CampaignArtifactStore {
             snapshot,
             fingerprint,
         })
+    }
+
+    /// Streams one exact source archive into its fixed create-new role and returns a bound handle.
+    pub(super) fn write_source_archive<R: Read + ?Sized>(
+        &self,
+        source: &mut R,
+        expected_length: u64,
+    ) -> Result<PersistedSourceArchiveBytes> {
+        self.write_source_archive_inner(source, expected_length, || {})
+    }
+
+    fn write_source_archive_inner<R: Read + ?Sized>(
+        &self,
+        source: &mut R,
+        expected_length: u64,
+        post_write: impl FnOnce(),
+    ) -> Result<PersistedSourceArchiveBytes> {
+        let path = ArtifactPath::canonical(SOURCE_ARCHIVE_PATH.into())?;
+        let BoundStreamedWrite {
+            parent: source_directory,
+            parent_identity: source_directory_identity,
+            file,
+            snapshot,
+            fingerprint,
+        } = self.write_streamed_create_new(
+            &path,
+            expected_length,
+            MAX_SOURCE_ARCHIVE_V1_BYTES,
+            |writer| copy_exact_source(source, writer, expected_length),
+        )?;
+        post_write();
+        let root = self.root.try_clone().context("clone source archive root")?;
+        let root_identity = verified_directory_identity(&root, "source archive root")?;
+        anyhow::ensure!(
+            root_identity == self.identity,
+            "source archive root identity changed"
+        );
+        let persisted = PersistedSourceArchiveBytes {
+            absolute_root: self.absolute_root.clone(),
+            root,
+            root_identity,
+            source_directory,
+            source_directory_identity,
+            file,
+            snapshot,
+            fingerprint,
+        };
+        persisted.ensure_unchanged()?;
+        Ok(persisted)
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_source_archive_with_post_write_hook<R: Read + ?Sized>(
+        &self,
+        source: &mut R,
+        expected_length: u64,
+        post_write: impl FnOnce(),
+    ) -> Result<PersistedSourceArchiveBytes> {
+        self.write_source_archive_inner(source, expected_length, post_write)
     }
 
     pub(super) fn create_new(absolute_root: &Path) -> Result<Self> {
@@ -707,7 +864,7 @@ impl CampaignArtifactStore {
         self.write_streamed_create_new(path, expected_length, maximum, |writer| {
             copy_exact_source(&mut reader, writer, expected_length)
         })
-        .map(|(_, _, fingerprint)| fingerprint)
+        .map(|written| written.fingerprint)
     }
 
     fn write_streamed_create_new(
@@ -716,7 +873,7 @@ impl CampaignArtifactStore {
         expected_length: u64,
         maximum: u64,
         emit: impl FnOnce(&mut dyn Write) -> Result<()>,
-    ) -> Result<(fs::File, FileSnapshot, ArtifactFingerprint)> {
+    ) -> Result<BoundStreamedWrite> {
         anyhow::ensure!(
             expected_length <= maximum,
             "campaign artifact exceeds byte limit"
@@ -764,7 +921,17 @@ impl CampaignArtifactStore {
             self.reopen_bound_artifact(&components, &name, parent_identity, snapshot, maximum)?;
         self.verify_root()?;
         ensure_file_unchanged(&final_reopen, snapshot, "campaign artifact")?;
-        Ok((final_reopen, snapshot, retained_fingerprint))
+        anyhow::ensure!(
+            verified_directory_identity(&parent, "campaign artifact parent")? == parent_identity,
+            "campaign artifact parent changed"
+        );
+        Ok(BoundStreamedWrite {
+            parent,
+            parent_identity,
+            file: final_reopen,
+            snapshot,
+            fingerprint: retained_fingerprint,
+        })
     }
 
     fn reopen_bound_artifact(
@@ -889,7 +1056,7 @@ fn copy_exact_source<R: Read + ?Sized, W: Write + ?Sized>(
     Ok(())
 }
 
-fn fingerprint_exact_source(
+pub(super) fn fingerprint_exact_source(
     reader: &mut (impl Read + Seek),
     expected_length: u64,
 ) -> Result<ArtifactFingerprint> {

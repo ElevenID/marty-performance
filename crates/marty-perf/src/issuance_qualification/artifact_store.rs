@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
 };
 
@@ -26,6 +26,7 @@ const BUILD_INPUT_ARCHIVE_PATH: &str = "build/input-files.bia";
 const BUILD_INPUT_INVENTORY_PATH: &str = "build/input-inventory.json";
 pub(super) const SOURCE_ARCHIVE_PATH: &str = "source/exact-tree.sar";
 const STREAM_BUFFER_BYTES: usize = 8 * 1024;
+const MAX_MATERIALIZED_INPUT_MEMBERS: u32 = 65_536;
 
 const FIXED_DIRECTORIES: &[&str] = &[
     "inputs",
@@ -62,44 +63,75 @@ pub(super) struct CampaignArtifactStore {
     identity: FileIdentity,
 }
 
-pub(super) struct MaterializedInputStore {
-    absolute_root: PathBuf,
-    root: fs::File,
-    identity: FileIdentity,
-    sealed_snapshot: Cell<Option<FileSnapshot>>,
-    directories: RefCell<BTreeMap<Vec<OsString>, FileSnapshot>>,
-    members: RefCell<BTreeMap<Vec<OsString>, FileSnapshot>>,
-    sealed: Cell<bool>,
-}
-
-pub(super) struct MaterializedInputMember {
-    file: fs::File,
+struct MaterializedMemberBinding {
     snapshot: FileSnapshot,
     fingerprint: ArtifactFingerprint,
     executable: bool,
+}
+
+struct MaterializedInputTreeState {
+    absolute_root: PathBuf,
+    root: fs::File,
+    identity: FileIdentity,
+    maximum_members: usize,
+    maximum_member_bytes: u64,
+    directories: BTreeMap<Vec<OsString>, FileSnapshot>,
+    members: BTreeMap<Vec<OsString>, MaterializedMemberBinding>,
+}
+
+/// Mutable create-only construction state; it is not a materialization capability.
+pub(super) struct MaterializedInputStoreBuilder {
+    tree: MaterializedInputTreeState,
+    poisoned: bool,
+}
+
+/// Sealed proof that one exact bounded materialized tree remains unchanged.
+pub(super) struct MaterializedInputStore {
+    tree: MaterializedInputTreeState,
+    sealed_root_snapshot: FileSnapshot,
+    expected_children: BTreeMap<Vec<OsString>, BTreeSet<OsString>>,
+    invalid: Cell<bool>,
+    #[cfg(test)]
+    full_tree_scan_count: Cell<usize>,
+}
+
+/// Lightweight receipt for one completed member write.
+pub(super) struct MaterializedInputMember {
+    fingerprint: ArtifactFingerprint,
 }
 
 impl MaterializedInputMember {
     pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
         &self.fingerprint
     }
-
-    pub(super) fn ensure_unchanged(&self) -> Result<()> {
-        ensure_file_unchanged(&self.file, self.snapshot, "materialized build input")?;
-        verify_materialized_file_permissions(&self.file, self.executable)?;
-        let mut retained = &self.file;
-        anyhow::ensure!(
-            fingerprint_exact_source(&mut retained, self.fingerprint.byte_length)?
-                == self.fingerprint,
-            "materialized build input changed"
-        );
-        ensure_file_unchanged(&self.file, self.snapshot, "materialized build input")
-    }
 }
 
-impl MaterializedInputStore {
-    pub(super) fn create_new(absolute_root: &Path) -> Result<Self> {
+impl MaterializedInputStoreBuilder {
+    pub(super) fn create_new(
+        absolute_root: &Path,
+        maximum_members: u32,
+        maximum_member_bytes: u64,
+    ) -> Result<Self> {
+        Self::create_new_inner(absolute_root, maximum_members, maximum_member_bytes)
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
+    fn create_new_inner(
+        absolute_root: &Path,
+        maximum_members: u32,
+        maximum_member_bytes: u64,
+    ) -> Result<Self> {
         anyhow::ensure!(absolute_root.is_absolute(), "materialization rejected");
+        anyhow::ensure!(
+            (1..=MAX_MATERIALIZED_INPUT_MEMBERS).contains(&maximum_members),
+            "materialization rejected"
+        );
+        anyhow::ensure!(
+            maximum_member_bytes <= MAX_FIXED_BUILD_INPUT_BYTES,
+            "materialization rejected"
+        );
+        let maximum_members =
+            usize::try_from(maximum_members).context("materialization rejected")?;
         ensure_directory_durability_supported().context("materialization rejected")?;
         let parent_path = absolute_root.parent().context("materialization rejected")?;
         let name = absolute_root
@@ -121,207 +153,76 @@ impl MaterializedInputStore {
         sync_directory(&parent).context("materialization rejected")?;
         let identity = verified_directory_identity(&root, "materialized input root")?;
         Ok(Self {
-            absolute_root: absolute_root.to_owned(),
-            root,
-            identity,
-            sealed_snapshot: Cell::new(None),
-            directories: RefCell::new(BTreeMap::new()),
-            members: RefCell::new(BTreeMap::new()),
-            sealed: Cell::new(false),
+            tree: MaterializedInputTreeState {
+                absolute_root: absolute_root.to_owned(),
+                root,
+                identity,
+                maximum_members,
+                maximum_member_bytes,
+                directories: BTreeMap::new(),
+                members: BTreeMap::new(),
+            },
+            poisoned: false,
         })
     }
 
-    pub(super) fn verify_root(&self) -> Result<()> {
-        self.verify_bound_snapshots()?;
-        let validation = self.verify_exact_tree();
-        let post_scan = self.verify_bound_snapshots();
-        post_scan?;
-        validation
+    pub(super) fn seal(mut self) -> Result<MaterializedInputStore> {
+        anyhow::ensure!(!self.poisoned, "materialization rejected");
+        self.poisoned = true;
+        self.seal_inner()
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))
     }
 
-    #[cfg(test)]
-    pub(super) fn verify_root_with_post_scan_hook(&self, hook: impl FnOnce()) -> Result<()> {
-        self.verify_bound_snapshots()?;
-        let validation = self.verify_exact_tree();
-        hook();
-        let post_scan = self.verify_bound_snapshots();
-        post_scan?;
-        validation
-    }
-
-    fn verify_bound_snapshots(&self) -> Result<()> {
-        anyhow::ensure!(
-            verified_directory_identity(&self.root, "materialized input root")? == self.identity,
-            "materialization rejected"
-        );
-        if self.sealed.get() {
-            verify_materialized_directory_permissions(&self.root)?;
-            anyhow::ensure!(
-                self.sealed_snapshot.get()
-                    == Some(handle_snapshot(
-                        &self.root,
-                        true,
-                        "materialized input root"
-                    )?),
-                "materialization rejected"
-            );
-        }
-        let bound = open_absolute_directory(&self.absolute_root, "materialized input root")
-            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
-        anyhow::ensure!(
-            verified_directory_identity(&bound, "materialized input root")? == self.identity,
-            "materialization rejected"
-        );
-        let directories = self
-            .directories
-            .borrow()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for components in directories {
-            let directory = self.directory_for(&components)?;
-            if self.sealed.get() {
-                verify_materialized_directory_permissions(&directory)?;
-                anyhow::ensure!(
-                    self.directories.borrow().get(&components).copied()
-                        == Some(handle_snapshot(
-                            &directory,
-                            true,
-                            "materialized input directory",
-                        )?),
-                    "materialization rejected"
-                );
-            }
-        }
-        let members = self
-            .members
-            .borrow()
-            .iter()
-            .map(|(path, snapshot)| (path.clone(), *snapshot))
-            .collect::<Vec<_>>();
-        for (path, expected_snapshot) in members {
-            let (name, parents) = path.split_last().context("materialization rejected")?;
-            let parent = self.directory_for(parents)?;
-            let opened = open_child_file(
-                &parent,
-                name,
-                MAX_FIXED_BUILD_INPUT_BYTES,
-                "materialized build input",
-            )
-            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
-            anyhow::ensure!(
-                opened.snapshot == expected_snapshot,
-                "materialization rejected"
-            );
-        }
-        Ok(())
-    }
-
-    fn verify_exact_tree(&self) -> Result<()> {
-        let directories = self.directories.borrow();
-        let members = self.members.borrow();
-        let mut parents = directories.keys().cloned().collect::<Vec<_>>();
-        parents.push(Vec::new());
-        for parent_path in parents {
-            let mut directory = self.directory_for(&parent_path)?;
-            let depth = parent_path.len();
-            let expected = directories
-                .keys()
-                .chain(members.keys())
-                .filter(|path| path.len() == depth + 1 && path[..depth] == parent_path)
-                .map(|path| path[depth].clone())
-                .collect::<BTreeSet<_>>();
-            let mut actual = BTreeSet::new();
-            let mut observed = 0_usize;
-            for entry in read_dir_at(&mut directory)
-                .map_err(|_| anyhow::anyhow!("materialization rejected"))?
-            {
-                observed = observed
-                    .checked_add(1)
-                    .context("materialization rejected")?;
-                anyhow::ensure!(
-                    observed <= expected.len().saturating_add(2),
-                    "materialization rejected"
-                );
-                let name = entry
-                    .map_err(|_| anyhow::anyhow!("materialization rejected"))?
-                    .name()
-                    .to_owned();
-                if name != "." && name != ".." {
-                    anyhow::ensure!(
-                        expected.contains(&name) && actual.insert(name),
-                        "materialization rejected"
-                    );
-                }
-            }
-            anyhow::ensure!(actual == expected, "materialization rejected");
-        }
-        for (path, expected_snapshot) in members.iter() {
-            let (name, parents) = path.split_last().context("materialization rejected")?;
-            let parent = self.directory_for(parents)?;
-            let opened = open_child_file(
-                &parent,
-                name,
-                MAX_FIXED_BUILD_INPUT_BYTES,
-                "materialized build input",
-            )
-            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
-            anyhow::ensure!(
-                opened.snapshot == *expected_snapshot,
-                "materialization rejected"
-            );
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) fn verify_exact_tree_for_test(&self) -> Result<()> {
-        self.verify_exact_tree()
-    }
-
-    pub(super) fn seal(&self) -> Result<()> {
-        let paths = self
-            .directories
-            .borrow()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+    fn seal_inner(mut self) -> Result<MaterializedInputStore> {
+        verify_materialized_root_binding(&self.tree)?;
+        let expected_children = expected_materialized_children(&self.tree)?;
+        let paths = self.tree.directories.keys().cloned().collect::<Vec<_>>();
         for path in paths.into_iter().rev() {
-            let directory = self.directory_for(&path)?;
+            let directory = open_materialized_directory(&self.tree, &path)?;
             set_materialized_directory_permissions(&directory)?;
             sync_directory(&directory)?;
             if let Some((_name, parent_path)) = path.split_last() {
-                let parent = self.directory_for(parent_path)?;
+                let parent = open_materialized_directory(&self.tree, parent_path)?;
                 sync_directory(&parent)?;
             }
             verify_materialized_directory_permissions(&directory)?;
             let snapshot = handle_snapshot(&directory, true, "materialized input directory")?;
-            self.directories.borrow_mut().insert(path, snapshot);
+            self.tree.directories.insert(path, snapshot);
         }
-        set_materialized_directory_permissions(&self.root)?;
-        sync_directory(&self.root)?;
+        set_materialized_directory_permissions(&self.tree.root)?;
+        sync_directory(&self.tree.root)?;
         let parent_path = self
+            .tree
             .absolute_root
             .parent()
             .context("materialization rejected")?;
         let parent = open_absolute_directory(parent_path, "materialization parent")?;
         sync_directory(&parent)?;
-        verify_materialized_directory_permissions(&self.root)?;
-        self.sealed_snapshot.set(Some(handle_snapshot(
-            &self.root,
-            true,
-            "materialized input root",
-        )?));
-        self.sealed.set(true);
-        self.verify_root()
+        verify_materialized_directory_permissions(&self.tree.root)?;
+        let sealed_root_snapshot =
+            handle_snapshot(&self.tree.root, true, "materialized input root")?;
+        let store = MaterializedInputStore {
+            tree: self.tree,
+            sealed_root_snapshot,
+            expected_children,
+            invalid: Cell::new(false),
+            #[cfg(test)]
+            full_tree_scan_count: Cell::new(0),
+        };
+        store.verify_root()?;
+        Ok(store)
     }
 
-    fn directory_for(&self, components: &[OsString]) -> Result<fs::File> {
-        let mut directory = self.root.try_clone().context("materialization rejected")?;
+    fn directory_for_create(&mut self, components: &[OsString]) -> Result<fs::File> {
+        let mut directory = self
+            .tree
+            .root
+            .try_clone()
+            .context("materialization rejected")?;
         let mut prefix = Vec::with_capacity(components.len());
         for component in components {
             prefix.push(component.clone());
-            let expected = self.directories.borrow().get(&prefix).copied();
+            let expected = self.tree.directories.get(&prefix).copied();
             if let Some(expected) = expected {
                 directory =
                     open_child_directory(&directory, component, "materialized input directory")
@@ -332,6 +233,10 @@ impl MaterializedInputStore {
                     "materialization rejected"
                 );
             } else {
+                anyhow::ensure!(
+                    !self.tree.members.contains_key(&prefix),
+                    "materialization rejected"
+                );
                 let created = AtOpenOptions::default()
                     .mkdir_at(&directory, component)
                     .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
@@ -339,9 +244,7 @@ impl MaterializedInputStore {
                 sync_directory(&created).context("materialization rejected")?;
                 sync_directory(&directory).context("materialization rejected")?;
                 let snapshot = handle_snapshot(&created, true, "materialized input directory")?;
-                self.directories
-                    .borrow_mut()
-                    .insert(prefix.clone(), snapshot);
+                self.tree.directories.insert(prefix.clone(), snapshot);
                 directory = created;
             }
         }
@@ -349,20 +252,48 @@ impl MaterializedInputStore {
     }
 
     pub(super) fn write_member(
-        &self,
+        &mut self,
         relative_path: &str,
         executable: bool,
         expected: &ArtifactFingerprint,
         emit: impl FnOnce(&mut dyn Write) -> Result<()>,
     ) -> Result<MaterializedInputMember> {
-        anyhow::ensure!(!self.sealed.get(), "materialization rejected");
-        self.verify_root()?;
+        anyhow::ensure!(!self.poisoned, "materialization rejected");
+        self.poisoned = true;
+        let result = self.write_member_inner(relative_path, executable, expected, emit);
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result.map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
+    fn write_member_inner(
+        &mut self,
+        relative_path: &str,
+        executable: bool,
+        expected: &ArtifactFingerprint,
+        emit: impl FnOnce(&mut dyn Write) -> Result<()>,
+    ) -> Result<MaterializedInputMember> {
+        anyhow::ensure!(
+            self.tree.members.len() < self.tree.maximum_members,
+            "materialization rejected"
+        );
+        anyhow::ensure!(
+            expected.byte_length <= self.tree.maximum_member_bytes,
+            "materialization rejected"
+        );
+        verify_materialized_root_binding(&self.tree)?;
         let mut components =
             validated_components(Path::new(relative_path)).context("materialization rejected")?;
         let name = components.pop().context("materialization rejected")?;
-        let parent = self.directory_for(&components)?;
         let mut member_path = components.clone();
         member_path.push(name.clone());
+        anyhow::ensure!(
+            !self.tree.members.contains_key(&member_path)
+                && !self.tree.directories.contains_key(&member_path),
+            "materialization rejected"
+        );
+        let parent = self.directory_for_create(&components)?;
         let mut options = AtOpenOptions::default();
         options
             .read(true)
@@ -376,7 +307,7 @@ impl MaterializedInputStore {
             let mut writer = ExactFingerprintWriter::new(
                 &mut file,
                 expected.byte_length,
-                MAX_FIXED_BUILD_INPUT_BYTES,
+                self.tree.maximum_member_bytes,
             )?;
             emit(&mut writer).context("materialization rejected")?;
             writer.finish().context("materialization rejected")?
@@ -390,8 +321,8 @@ impl MaterializedInputStore {
         sync_directory(&parent).context("materialization rejected")?;
         let snapshot = verified_file_snapshot(
             &file,
-            MAX_FIXED_BUILD_INPUT_BYTES,
-            "materialized build input",
+            self.tree.maximum_member_bytes,
+            "materialized input member",
         )?;
         anyhow::ensure!(
             snapshot.readonly
@@ -399,13 +330,13 @@ impl MaterializedInputStore {
                 && snapshot.byte_length == expected.byte_length,
             "materialization rejected"
         );
-        ensure_file_unchanged(&file, snapshot, "materialized build input")?;
+        ensure_file_unchanged(&file, snapshot, "materialized input member")?;
         drop(file);
         let opened = open_child_file(
             &parent,
             &name,
-            MAX_FIXED_BUILD_INPUT_BYTES,
-            "materialized build input",
+            self.tree.maximum_member_bytes,
+            "materialized input member",
         )
         .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
         let mut retained = opened.file;
@@ -417,15 +348,243 @@ impl MaterializedInputStore {
             "materialization rejected"
         );
         verify_materialized_file_permissions(&retained, executable)?;
-        ensure_file_unchanged(&retained, snapshot, "materialized build input")?;
-        self.members.borrow_mut().insert(member_path, snapshot);
-        self.verify_root()?;
+        ensure_file_unchanged(&retained, snapshot, "materialized input member")?;
+        drop(retained);
+        self.tree.members.insert(
+            member_path,
+            MaterializedMemberBinding {
+                snapshot,
+                fingerprint: retained_fingerprint.clone(),
+                executable,
+            },
+        );
+        verify_materialized_root_binding(&self.tree)?;
         Ok(MaterializedInputMember {
-            file: retained,
-            snapshot,
             fingerprint: retained_fingerprint,
-            executable,
         })
+    }
+
+    #[cfg(test)]
+    #[allow(
+        clippy::unused_self,
+        reason = "the per-builder assertion documents that construction never scans the tree"
+    )]
+    pub(super) fn full_tree_scan_count_for_test(&self) -> usize {
+        0
+    }
+
+    #[cfg(test)]
+    #[allow(
+        clippy::unused_self,
+        reason = "the per-builder assertion documents that bindings retain metadata, not handles"
+    )]
+    pub(super) fn retained_member_handle_count_for_test(&self) -> usize {
+        0
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_poisoned_for_test(&self) -> bool {
+        self.poisoned
+    }
+}
+
+fn verify_materialized_root_binding(tree: &MaterializedInputTreeState) -> Result<()> {
+    anyhow::ensure!(
+        verified_directory_identity(&tree.root, "materialized input root")? == tree.identity,
+        "materialization rejected"
+    );
+    let bound = open_absolute_directory(&tree.absolute_root, "materialized input root")
+        .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+    anyhow::ensure!(
+        verified_directory_identity(&bound, "materialized input root")? == tree.identity,
+        "materialization rejected"
+    );
+    Ok(())
+}
+
+fn open_materialized_directory(
+    tree: &MaterializedInputTreeState,
+    components: &[OsString],
+) -> Result<fs::File> {
+    let mut directory = tree.root.try_clone().context("materialization rejected")?;
+    let mut prefix = Vec::with_capacity(components.len());
+    for component in components {
+        prefix.push(component.clone());
+        let expected = tree
+            .directories
+            .get(&prefix)
+            .copied()
+            .context("materialization rejected")?;
+        directory = open_child_directory(&directory, component, "materialized input directory")
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+        anyhow::ensure!(
+            verified_directory_identity(&directory, "materialized input directory")?
+                == expected.identity,
+            "materialization rejected"
+        );
+    }
+    Ok(directory)
+}
+
+fn expected_materialized_children(
+    tree: &MaterializedInputTreeState,
+) -> Result<BTreeMap<Vec<OsString>, BTreeSet<OsString>>> {
+    let mut children = BTreeMap::<Vec<OsString>, BTreeSet<OsString>>::new();
+    children.entry(Vec::new()).or_default();
+    for path in tree.directories.keys() {
+        children.entry(path.clone()).or_default();
+    }
+    for path in tree.directories.keys().chain(tree.members.keys()) {
+        let (name, parent) = path.split_last().context("materialization rejected")?;
+        anyhow::ensure!(
+            children
+                .get_mut(parent)
+                .context("materialization rejected")?
+                .insert(name.clone()),
+            "materialization rejected"
+        );
+    }
+    Ok(children)
+}
+
+impl MaterializedInputStore {
+    pub(super) fn verify_root(&self) -> Result<()> {
+        self.verify_root_with_hook(|| {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_root_with_post_scan_hook(&self, hook: impl FnOnce()) -> Result<()> {
+        self.verify_root_with_hook(hook)
+    }
+
+    fn verify_root_with_hook(&self, hook: impl FnOnce()) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        let result = self.verify_root_inner(hook);
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
+    fn verify_root_inner(&self, hook: impl FnOnce()) -> Result<()> {
+        self.verify_directory_bindings()?;
+        self.verify_member_bindings(true)?;
+        self.verify_exact_tree()?;
+        hook();
+        self.verify_member_bindings(false)?;
+        self.verify_directory_bindings()?;
+        Ok(())
+    }
+
+    fn verify_directory_bindings(&self) -> Result<()> {
+        verify_materialized_root_binding(&self.tree)?;
+        verify_materialized_directory_permissions(&self.tree.root)?;
+        anyhow::ensure!(
+            handle_snapshot(&self.tree.root, true, "materialized input root")?
+                == self.sealed_root_snapshot,
+            "materialization rejected"
+        );
+        for (path, expected) in &self.tree.directories {
+            let directory = open_materialized_directory(&self.tree, path)?;
+            verify_materialized_directory_permissions(&directory)?;
+            anyhow::ensure!(
+                handle_snapshot(&directory, true, "materialized input directory")? == *expected,
+                "materialization rejected"
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_member_bindings(&self, rehash: bool) -> Result<()> {
+        for (path, binding) in &self.tree.members {
+            let (name, parents) = path.split_last().context("materialization rejected")?;
+            let parent = open_materialized_directory(&self.tree, parents)?;
+            let opened = open_child_file(
+                &parent,
+                name,
+                self.tree.maximum_member_bytes,
+                "materialized input member",
+            )
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+            let mut file = opened.file;
+            anyhow::ensure!(
+                opened.snapshot == binding.snapshot,
+                "materialization rejected"
+            );
+            verify_materialized_file_permissions(&file, binding.executable)?;
+            if rehash {
+                anyhow::ensure!(
+                    fingerprint_exact_source(&mut file, binding.fingerprint.byte_length)?
+                        == binding.fingerprint,
+                    "materialization rejected"
+                );
+            }
+            ensure_file_unchanged(&file, binding.snapshot, "materialized input member")?;
+        }
+        Ok(())
+    }
+
+    fn verify_exact_tree(&self) -> Result<()> {
+        #[cfg(test)]
+        self.full_tree_scan_count.set(
+            self.full_tree_scan_count
+                .get()
+                .checked_add(1)
+                .context("materialization rejected")?,
+        );
+        for (parent_path, expected) in &self.expected_children {
+            let mut directory = open_materialized_directory(&self.tree, parent_path)?;
+            let maximum_observed = expected
+                .len()
+                .checked_add(2)
+                .context("materialization rejected")?;
+            let mut actual = BTreeSet::new();
+            let mut observed = 0_usize;
+            for entry in read_dir_at(&mut directory)
+                .map_err(|_| anyhow::anyhow!("materialization rejected"))?
+            {
+                observed = observed
+                    .checked_add(1)
+                    .context("materialization rejected")?;
+                anyhow::ensure!(observed <= maximum_observed, "materialization rejected");
+                let name = entry
+                    .map_err(|_| anyhow::anyhow!("materialization rejected"))?
+                    .name()
+                    .to_owned();
+                if name != "." && name != ".." {
+                    anyhow::ensure!(
+                        expected.contains(&name) && actual.insert(name),
+                        "materialization rejected"
+                    );
+                }
+            }
+            anyhow::ensure!(&actual == expected, "materialization rejected");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_exact_tree_for_test(&self) -> Result<()> {
+        self.verify_root()
+    }
+
+    #[cfg(test)]
+    pub(super) fn member_count_for_test(&self) -> usize {
+        self.tree.members.len()
+    }
+
+    #[cfg(test)]
+    #[allow(
+        clippy::unused_self,
+        reason = "the per-store assertion documents that sealed bindings retain metadata, not handles"
+    )]
+    pub(super) fn retained_member_handle_count_for_test(&self) -> usize {
+        0
+    }
+
+    #[cfg(test)]
+    pub(super) fn full_tree_scan_count_for_test(&self) -> usize {
+        self.full_tree_scan_count.get()
     }
 }
 

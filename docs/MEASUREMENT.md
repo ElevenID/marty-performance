@@ -228,6 +228,35 @@ the file is create-new and cannot be placed beneath the source repository.
 This command creates no campaign, build receipt, qualification threshold,
 network request, benchmark result, or activation claim.
 
+The next nonactivating controller boundary composes that in-process export
+receipt with the already-open, read-only `source/exact-tree.sar` handle and an
+explicit allowlist of already-open public build-input handles. Every build
+input carries an exact uppercase SHA-256 and byte-length pin, a closed logical
+role and mode, and a handle-relative staging-root binding. There is no glob,
+directory discovery, inherited host path, network access, or secret-input
+role. The source-export root, each build-input root, and the new create-only
+campaign root are retained as non-cloneable handle capabilities and must be
+pairwise neither equal nor ancestors of one another. The controller checks
+the receipt's archive, `Cargo.lock`, commit, tree, and member count; the common
+campaign ID and target; every approved, allowlisted original staged file
+handle; and the canonical retained source, inventory, and framed archive before
+returning one opaque `CapturedFixedBuildInputs` capability. Any governed
+coordinate mismatch or detected retained-root, approved-binding, or
+approved-byte time-of-check/time-of-use change returns no capability, and any
+partially written create-only campaign root is poisoned rather than retried.
+Consuming the capability only enables the existing immutable materializer; it
+does not launch Cargo or rustc, read a remote, create a build or install
+receipt, observe a quiet window, run a benchmark, evaluate a threshold, or
+activate CDLA. This composition boundary has no command-line entry point.
+
+The current campaign artifact-store kernel deliberately fails closed before
+creating a campaign root when the controller runs on Windows because durable
+directory synchronization is not implemented there. Consequently this
+composition capability is currently unavailable to a Windows-host controller.
+An eligible non-Windows controller may bind an explicit Windows target and its
+approved staged Windows inputs; that does not claim Windows-host capture or
+materialization support.
+
 `build/fixed-benchmark.json` then binds that verified archive and Cargo.lock to
 the exact Cargo and rustc binaries/versions, target, `bench` profile, sole
 `issuance_bench` feature, exact working directory and logical Cargo command,

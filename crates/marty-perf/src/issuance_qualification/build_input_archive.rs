@@ -1,5 +1,6 @@
 //! Canonical, nonactivating fixed-build input archive emission.
 
+use std::cell::Cell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -8,19 +9,21 @@ use marty_perf_schema::ArtifactFingerprint;
 use sha2::{Digest, Sha256};
 
 use super::artifact_store::{
-    CampaignArtifactStore, MaterializedInputStore, MaterializedInputStoreBuilder,
+    fingerprint_exact_source, CampaignArtifactStore, JointBuildInputPersistenceBinding,
+    MaterializedInputParent, MaterializedInputStore, MaterializedInputStoreBuilder,
     PersistedBuildInputArchiveBytes, PersistedBuildInputInventoryBytes,
 };
 use super::{
     canonical_pretty_bytes, concrete_target_linker_environment_name, ensure_file_unchanged,
     fingerprint, valid_artifact_fingerprint, valid_build_input_inventory, valid_campaign_id,
     validate_build_input_archive_stream, BuildInputEntry, BuildInputInventory, OpenedInput,
-    FIXED_BUILD_INPUT_ARCHIVE_MAGIC, MAX_FIXED_BUILD_INPUT_BYTES, MAX_FIXED_BUILD_INPUT_ENTRIES,
-    MAX_SOURCE_ARCHIVE_V1_BYTES,
+    FIXED_BUILD_INPUT_ARCHIVE_MAGIC, FIXED_CARGO_CONFIGURATION_BYTES, MAX_FIXED_BUILD_INPUT_BYTES,
+    MAX_FIXED_BUILD_INPUT_ENTRIES, MAX_SOURCE_ARCHIVE_V1_BYTES,
 };
 
 const MEMBER_BUFFER_BYTES: usize = 8 * 1024;
 const MEMBER_BUFFER_BYTES_U64: u64 = 8 * 1024;
+const GENERATED_CARGO_CONFIGURATION_PATH: &str = "cargo-home/config.toml";
 
 /// Closed roles for caller-approved public build inputs.
 ///
@@ -110,14 +113,34 @@ impl ApprovedPublicBuildInput {
         )
     }
 
-    /// Binds one explicitly generated, staged, clean public Cargo configuration.
-    ///
-    /// This is a provenance assertion by the trusted caller, not a heuristic secret scan. Live
-    /// Cargo configuration and credentials have no generic role or constructor.
+    /// Binds the one exact internally specified offline Cargo configuration.
     pub(super) fn bind_generated_cargo_configuration(
         relative_path: String,
         input: OpenedInput,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            relative_path == GENERATED_CARGO_CONFIGURATION_PATH,
+            "fixed build input capture rejected"
+        );
+        ensure_file_unchanged(&input.file, input.snapshot, "build-input archive member")?;
+        anyhow::ensure!(
+            input.snapshot.byte_length == u64::try_from(FIXED_CARGO_CONFIGURATION_BYTES.len())?,
+            "fixed build input capture rejected"
+        );
+        let mut retained = input.file.try_clone()?;
+        retained.seek(SeekFrom::Start(0))?;
+        let mut exact = vec![0_u8; FIXED_CARGO_CONFIGURATION_BYTES.len()];
+        retained.read_exact(&mut exact)?;
+        let mut trailing = [0_u8; 1];
+        anyhow::ensure!(
+            retained.read(&mut trailing)? == 0,
+            "fixed build input capture rejected"
+        );
+        anyhow::ensure!(
+            exact == FIXED_CARGO_CONFIGURATION_BYTES,
+            "fixed build input capture rejected"
+        );
+        ensure_file_unchanged(&input.file, input.snapshot, "build-input archive member")?;
         Self::bind_role(
             ApprovedPublicBuildInputRole::GeneratedCargoConfiguration,
             relative_path,
@@ -158,6 +181,8 @@ impl ApprovedPublicBuildInput {
 pub(super) struct PersistedFixedBuildInputs {
     inventory: PersistedBuildInputInventoryBytes,
     archive: PersistedBuildInputArchiveBytes,
+    binding: JointBuildInputPersistenceBinding,
+    invalid: Cell<bool>,
 }
 
 impl PersistedFixedBuildInputs {
@@ -170,16 +195,143 @@ impl PersistedFixedBuildInputs {
     pub(super) fn archive_fingerprint(&self) -> &ArtifactFingerprint {
         self.archive.fingerprint()
     }
+
+    fn ensure_unchanged(&self) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        let result = (|| {
+            self.binding
+                .ensure_unchanged(&self.inventory, &self.archive)?;
+            let mut inventory = self.inventory.retained_file().try_clone()?;
+            let mut archive = self.archive.retained_file().try_clone()?;
+            anyhow::ensure!(
+                fingerprint_exact_source(&mut inventory, self.inventory.fingerprint().byte_length,)?
+                    == *self.inventory.fingerprint(),
+                "materialization rejected"
+            );
+            anyhow::ensure!(
+                fingerprint_exact_source(&mut archive, self.archive.fingerprint().byte_length)?
+                    == *self.archive.fingerprint(),
+                "materialization rejected"
+            );
+            self.binding
+                .ensure_unchanged(&self.inventory, &self.archive)
+        })();
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!("materialization rejected"))
+    }
+
+    /// Sticky joint preflight used before any destination is created or populated.
+    pub(super) fn ensure_materialization_preflight(&self) -> Result<()> {
+        self.ensure_unchanged()
+    }
 }
 
 /// Proof that every verified archive member was published into one new immutable tree.
 pub(super) struct MaterializedBuildInputTree {
     store: MaterializedInputStore,
+    retained: PersistedFixedBuildInputs,
     member_count: usize,
     aggregate_fingerprint: ArtifactFingerprint,
+    metadata: FixedBuildInputMetadata,
+    invalid: Cell<bool>,
+}
+
+/// Minimal validated inventory projection needed to prepare the fixed build without rediscovery.
+pub(super) struct FixedBuildInputMetadata {
+    campaign_id: String,
+    target_triple: String,
+    inventory_fingerprint: ArtifactFingerprint,
+    archive_fingerprint: ArtifactFingerprint,
+    cargo_binary_fingerprint: ArtifactFingerprint,
+    rustc_binary_fingerprint: ArtifactFingerprint,
+    target_linker_relative_path: String,
+    target_linker_fingerprint: ArtifactFingerprint,
+    target_archiver_relative_path: String,
+    target_archiver_fingerprint: ArtifactFingerprint,
+}
+
+#[cfg(test)]
+pub(super) struct FixedBuildInputMetadataForTest {
+    pub(super) campaign_id: String,
+    pub(super) target_triple: String,
+    pub(super) inventory_fingerprint: ArtifactFingerprint,
+    pub(super) archive_fingerprint: ArtifactFingerprint,
+    pub(super) cargo_binary_fingerprint: ArtifactFingerprint,
+    pub(super) rustc_binary_fingerprint: ArtifactFingerprint,
+    pub(super) target_linker_relative_path: String,
+    pub(super) target_linker_fingerprint: ArtifactFingerprint,
+    pub(super) target_archiver_relative_path: String,
+    pub(super) target_archiver_fingerprint: ArtifactFingerprint,
+}
+
+impl FixedBuildInputMetadata {
+    #[cfg(test)]
+    pub(super) fn for_test(parts: FixedBuildInputMetadataForTest) -> Self {
+        Self {
+            campaign_id: parts.campaign_id,
+            target_triple: parts.target_triple,
+            inventory_fingerprint: parts.inventory_fingerprint,
+            archive_fingerprint: parts.archive_fingerprint,
+            cargo_binary_fingerprint: parts.cargo_binary_fingerprint,
+            rustc_binary_fingerprint: parts.rustc_binary_fingerprint,
+            target_linker_relative_path: parts.target_linker_relative_path,
+            target_linker_fingerprint: parts.target_linker_fingerprint,
+            target_archiver_relative_path: parts.target_archiver_relative_path,
+            target_archiver_fingerprint: parts.target_archiver_fingerprint,
+        }
+    }
+
+    pub(super) fn campaign_id(&self) -> &str {
+        &self.campaign_id
+    }
+
+    pub(super) fn target_triple(&self) -> &str {
+        &self.target_triple
+    }
+
+    pub(super) fn inventory_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.inventory_fingerprint
+    }
+
+    pub(super) fn archive_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.archive_fingerprint
+    }
+
+    pub(super) fn cargo_binary_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.cargo_binary_fingerprint
+    }
+
+    pub(super) fn rustc_binary_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.rustc_binary_fingerprint
+    }
+
+    pub(super) fn target_linker_relative_path(&self) -> &str {
+        &self.target_linker_relative_path
+    }
+
+    pub(super) fn target_linker_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.target_linker_fingerprint
+    }
+
+    pub(super) fn target_archiver_relative_path(&self) -> &str {
+        &self.target_archiver_relative_path
+    }
+
+    pub(super) fn target_archiver_fingerprint(&self) -> &ArtifactFingerprint {
+        &self.target_archiver_fingerprint
+    }
 }
 
 impl MaterializedBuildInputTree {
+    pub(super) fn store(&self) -> &MaterializedInputStore {
+        &self.store
+    }
+    pub(super) fn absolute_root(&self) -> &Path {
+        self.store.absolute_root()
+    }
+
     pub(super) fn member_count(&self) -> usize {
         self.member_count
     }
@@ -188,8 +340,21 @@ impl MaterializedBuildInputTree {
         &self.aggregate_fingerprint
     }
 
+    pub(super) fn metadata(&self) -> &FixedBuildInputMetadata {
+        &self.metadata
+    }
+
     pub(super) fn ensure_unchanged(&self) -> Result<()> {
-        self.store.verify_root()
+        anyhow::ensure!(!self.invalid.get(), "materialization rejected");
+        let result = (|| {
+            self.retained.ensure_unchanged()?;
+            self.store.verify_root()?;
+            self.retained.ensure_unchanged()
+        })();
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!("materialization rejected"))
     }
 }
 
@@ -503,10 +668,6 @@ fn prepare_fixed_build_inputs(
         input.ensure_unchanged()?;
     }
     let projected_inventory = projected_inventory_for_inputs(campaign_id, target_triple, &inputs)?;
-    anyhow::ensure!(
-        valid_build_input_inventory(&projected_inventory, windows, target_triple, campaign_id,),
-        "fixed build input capture rejected"
-    );
 
     let (entries, archive_fingerprint) = fingerprint_sorted_inputs(
         &mut inputs,
@@ -551,7 +712,15 @@ fn prepare_fixed_build_inputs(
 
 fn persist_fixed_build_inputs(
     store: &CampaignArtifactStore,
+    prepared: PreparedFixedBuildInputs,
+) -> Result<PersistedFixedBuildInputs> {
+    persist_fixed_build_inputs_inner(store, prepared, || {})
+}
+
+fn persist_fixed_build_inputs_inner(
+    store: &CampaignArtifactStore,
     mut prepared: PreparedFixedBuildInputs,
+    between_role_writes: impl FnOnce(),
 ) -> Result<PersistedFixedBuildInputs> {
     for member in &prepared.members {
         member.ensure_unchanged()?;
@@ -564,13 +733,23 @@ fn persist_fixed_build_inputs(
     for member in &prepared.members {
         member.ensure_unchanged()?;
     }
+    between_role_writes();
+    inventory.ensure_capture_binding_unchanged()?;
     let archive = emit_build_input_archive(store, &mut prepared.members)?;
     anyhow::ensure!(
-        archive.fingerprint() == &prepared.archive_fingerprint
-            && inventory.shares_store_with(&archive),
+        archive.fingerprint() == &prepared.archive_fingerprint,
         "fixed build input capture rejected"
     );
-    Ok(PersistedFixedBuildInputs { inventory, archive })
+    let binding = JointBuildInputPersistenceBinding::bind(&inventory, &archive)
+        .context("fixed build input capture rejected")?;
+    let persisted = PersistedFixedBuildInputs {
+        inventory,
+        archive,
+        binding,
+        invalid: Cell::new(false),
+    };
+    persisted.ensure_unchanged()?;
+    Ok(persisted)
 }
 
 /// Captures one explicit public handle allowlist as a canonical inventory and matching BIA.
@@ -583,6 +762,19 @@ pub(super) fn capture_fixed_build_inventory(
 ) -> Result<PersistedFixedBuildInputs> {
     let prepared = prepare_fixed_build_inputs(campaign_id, target_triple, windows, inputs)?;
     persist_fixed_build_inputs(store, prepared)
+}
+
+#[cfg(test)]
+fn capture_fixed_build_inventory_with_between_writes_hook(
+    store: &CampaignArtifactStore,
+    campaign_id: &str,
+    target_triple: &str,
+    windows: bool,
+    inputs: Vec<ApprovedPublicBuildInput>,
+    between_role_writes: impl FnOnce(),
+) -> Result<PersistedFixedBuildInputs> {
+    let prepared = prepare_fixed_build_inputs(campaign_id, target_triple, windows, inputs)?;
+    persist_fixed_build_inputs_inner(store, prepared, between_role_writes)
 }
 
 fn read_verified_inventory(
@@ -694,23 +886,69 @@ fn materialized_aggregate(
 }
 
 /// Materializes only the inventory-bound members from retained joint-capability handles.
+#[cfg(test)]
 pub(super) fn materialize_fixed_build_inputs(
-    mut capability: PersistedFixedBuildInputs,
+    capability: PersistedFixedBuildInputs,
     absolute_destination: &Path,
 ) -> Result<MaterializedBuildInputTree> {
+    materialize_fixed_build_inputs_inner(capability, |entry_count| {
+        MaterializedInputStoreBuilder::create_new(
+            absolute_destination,
+            entry_count,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+        )
+    })
+}
+
+pub(super) fn materialize_fixed_build_inputs_in_parent(
+    capability: PersistedFixedBuildInputs,
+    parent: &MaterializedInputParent,
+) -> Result<MaterializedBuildInputTree> {
+    materialize_fixed_build_inputs_inner(capability, |entry_count| {
+        parent.create_child_builder("inputs", entry_count, MAX_FIXED_BUILD_INPUT_BYTES)
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the single streaming pass keeps retained archive validation and create-only writes adjacent"
+)]
+fn materialize_fixed_build_inputs_inner(
+    mut capability: PersistedFixedBuildInputs,
+    create_store: impl FnOnce(u32) -> Result<MaterializedInputStoreBuilder>,
+) -> Result<MaterializedBuildInputTree> {
+    capability.ensure_materialization_preflight()?;
     let (inventory, inventory_bytes) = read_verified_inventory(&mut capability.inventory)?;
     validate_retained_archive(&mut capability.archive, &inventory)?;
     let inventory_fingerprint =
         fingerprint(&inventory_bytes).context("materialization rejected")?;
+    let unique_entry = |role: &str| -> Result<&BuildInputEntry> {
+        let mut matches = inventory.entries.iter().filter(|entry| entry.role == role);
+        let entry = matches.next().context("materialization rejected")?;
+        anyhow::ensure!(matches.next().is_none(), "materialization rejected");
+        Ok(entry)
+    };
+    let cargo = unique_entry("cargo_executable")?;
+    let rustc = unique_entry("rustc_executable")?;
+    let target_linker = unique_entry("target_linker_executable")?;
+    let target_archiver = unique_entry("target_archiver_executable")?;
+    let metadata = FixedBuildInputMetadata {
+        campaign_id: inventory.campaign_id.clone(),
+        target_triple: inventory.target_triple.clone(),
+        inventory_fingerprint: inventory_fingerprint.clone(),
+        archive_fingerprint: inventory.archive_fingerprint.clone(),
+        cargo_binary_fingerprint: cargo.fingerprint.clone(),
+        rustc_binary_fingerprint: rustc.fingerprint.clone(),
+        target_linker_relative_path: target_linker.relative_path.clone(),
+        target_linker_fingerprint: target_linker.fingerprint.clone(),
+        target_archiver_relative_path: target_archiver.relative_path.clone(),
+        target_archiver_fingerprint: target_archiver.fingerprint.clone(),
+    };
     let aggregate_fingerprint =
         materialized_aggregate(&inventory_fingerprint, &inventory.archive_fingerprint)?;
 
-    let mut store = MaterializedInputStoreBuilder::create_new(
-        absolute_destination,
-        inventory.entry_count,
-        MAX_FIXED_BUILD_INPUT_BYTES,
-    )
-    .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+    capability.ensure_materialization_preflight()?;
+    let mut store = create_store(inventory.entry_count)?;
     let archive = capability.archive.retained_file_mut();
     archive
         .seek(SeekFrom::Start(0))
@@ -754,21 +992,17 @@ pub(super) fn materialize_fixed_build_inputs(
             == 0,
         "materialization rejected"
     );
-    capability
-        .archive
-        .ensure_unchanged()
-        .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
-    capability
-        .inventory
-        .ensure_unchanged()
-        .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+    capability.ensure_materialization_preflight()?;
     let store = store
         .seal()
         .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
     let materialized = MaterializedBuildInputTree {
         store,
+        retained: capability,
         member_count,
         aggregate_fingerprint,
+        metadata,
+        invalid: Cell::new(false),
     };
     materialized
         .ensure_unchanged()
@@ -831,7 +1065,7 @@ pub(super) fn emit_build_input_archive(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::{self, Read};
 
     #[cfg(unix)]
@@ -875,6 +1109,13 @@ mod tests {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("synthetic member read failure"))
         }
+    }
+
+    #[cfg(unix)]
+    fn set_relative_mode(root: &Path, relative: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(root.join(relative), fs::Permissions::from_mode(mode)).unwrap();
     }
 
     #[test]
@@ -1267,6 +1508,55 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn generated_cargo_configuration_rejects_every_override_surface() {
+        let temporary = tempfile::tempdir().unwrap();
+        let malicious = [
+            // Same-length edit of the only accepted 21-byte configuration.
+            b"[net]\noffline = TRUE\n".as_slice(),
+            // Deletion and append mutations are distinct from semantic override cases.
+            b"[net]\n".as_slice(),
+            b"[net]\noffline = true\n#".as_slice(),
+            b"include = 'evil.toml'\n".as_slice(),
+            b"[build]\nrustc-wrapper = 'evil'\n".as_slice(),
+            b"[build]\nrustflags = ['-C', 'linker=evil']\n".as_slice(),
+            b"[env]\nAR = 'evil'\n".as_slice(),
+            b"[env]\nCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu]\nlinker = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu]\nar = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu]\nrunner = 'evil'\n".as_slice(),
+            b"[target.x86_64-unknown-linux-gnu.env]\nAR = 'evil'\n".as_slice(),
+        ];
+        for (ordinal, bytes) in malicious.into_iter().enumerate() {
+            let input =
+                opened_public_input(temporary.path(), &format!("malicious-{ordinal}"), bytes);
+            let Err(error) = ApprovedPublicBuildInput::bind_generated_cargo_configuration(
+                GENERATED_CARGO_CONFIGURATION_PATH.to_owned(),
+                input,
+            ) else {
+                panic!("malicious Cargo configuration accepted")
+            };
+            assert_eq!(error.to_string(), "fixed build input capture rejected");
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn persisted_fixture_for_fixed_build_composition_test(
+    ) -> (tempfile::TempDir, PersistedFixedBuildInputs) {
+        let (temporary, store) = store();
+        let inputs_root = tempfile::tempdir().unwrap();
+        let capability = capture_fixed_build_inventory(
+            &store,
+            CAMPAIGN_ID,
+            TARGET_TRIPLE,
+            false,
+            complete_public_inputs(inputs_root.path()),
+        )
+        .unwrap();
+        (temporary, capability)
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn explicit_allowlist_is_canonical_and_ignores_unlisted_files() {
         let (temporary, store) = store();
         let inputs_root = tempfile::tempdir().unwrap();
@@ -1326,6 +1616,96 @@ mod tests {
         assert!(!archive_bytes
             .windows(b"synthetic unlisted secret sentinel".len())
             .any(|window| window == b"synthetic unlisted secret sentinel"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn joint_persistence_rejects_root_and_build_replacement_after_restore_sticky() {
+        for replace_root in [true, false] {
+            let (temporary, store) = store();
+            let inputs_root = tempfile::tempdir().unwrap();
+            let captured = capture_fixed_build_inventory(
+                &store,
+                CAMPAIGN_ID,
+                TARGET_TRIPLE,
+                false,
+                complete_public_inputs(inputs_root.path()),
+            )
+            .unwrap();
+            captured.ensure_unchanged().unwrap();
+            let campaign = temporary.path().join("campaign");
+            let original = if replace_root {
+                campaign.clone()
+            } else {
+                campaign.join("build")
+            };
+            let displaced = if replace_root {
+                temporary.path().join("displaced-campaign")
+            } else {
+                campaign.join("displaced-build")
+            };
+            fs::rename(&original, &displaced).unwrap();
+            fs::create_dir(&original).unwrap();
+            if replace_root {
+                fs::create_dir(original.join("build")).unwrap();
+            }
+            if replace_root {
+                fs::remove_dir(original.join("build")).unwrap();
+            }
+            fs::remove_dir(&original).unwrap();
+            fs::rename(&displaced, &original).unwrap();
+            // The first check happens only after restoration, so the retained change tokens—not
+            // merely the path identities while displaced—must detect the replacement history.
+            assert_eq!(
+                captured.ensure_unchanged().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+            assert_eq!(
+                captured.ensure_unchanged().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacement_and_restore_between_inventory_and_archive_writes_issues_no_capability() {
+        for replace_root in [true, false] {
+            let (temporary, store) = store();
+            let inputs_root = tempfile::tempdir().unwrap();
+            let campaign = temporary.path().join("campaign");
+            let original = if replace_root {
+                campaign.clone()
+            } else {
+                campaign.join("build")
+            };
+            let displaced = if replace_root {
+                temporary.path().join("displaced-campaign")
+            } else {
+                campaign.join("displaced-build")
+            };
+            let result = capture_fixed_build_inventory_with_between_writes_hook(
+                &store,
+                CAMPAIGN_ID,
+                TARGET_TRIPLE,
+                false,
+                complete_public_inputs(inputs_root.path()),
+                || {
+                    fs::rename(&original, &displaced).unwrap();
+                    fs::create_dir(&original).unwrap();
+                    if replace_root {
+                        fs::create_dir(original.join("build")).unwrap();
+                    }
+                    if replace_root {
+                        fs::remove_dir(original.join("build")).unwrap();
+                    }
+                    fs::remove_dir(&original).unwrap();
+                    fs::rename(&displaced, &original).unwrap();
+                },
+            );
+            assert!(result.is_err());
+            assert!(!campaign.join("build/input-files.bia").exists());
+        }
     }
 
     #[test]
@@ -1463,7 +1843,7 @@ mod tests {
     fn joint_capability_materializes_only_canonical_members_create_new() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let (_campaign, store) = self::store();
+        let (campaign, store) = self::store();
         let inputs_root = tempfile::tempdir().unwrap();
         let captured = capture_fixed_build_inventory(
             &store,
@@ -1476,9 +1856,54 @@ mod tests {
         let destination_parent = tempfile::tempdir().unwrap();
         let destination = destination_parent.path().join("inputs");
         let materialized = materialize_fixed_build_inputs(captured, &destination).unwrap();
+        let inventory_bytes =
+            fs::read(campaign.path().join("campaign/build/input-inventory.json")).unwrap();
+        let inventory: BuildInputInventory = serde_json::from_slice(&inventory_bytes).unwrap();
+        let expected_role = |role: &str| {
+            inventory
+                .entries
+                .iter()
+                .find(|entry| entry.role == role)
+                .unwrap()
+        };
+        let metadata = materialized.metadata();
 
         assert_eq!(materialized.member_count(), 9);
         assert!(materialized.aggregate_fingerprint().byte_length > 0);
+        assert_eq!(metadata.campaign_id(), inventory.campaign_id);
+        assert_eq!(metadata.target_triple(), inventory.target_triple);
+        assert_eq!(
+            metadata.inventory_fingerprint(),
+            &fingerprint(&inventory_bytes).unwrap()
+        );
+        assert_eq!(
+            metadata.archive_fingerprint(),
+            &inventory.archive_fingerprint
+        );
+        assert_eq!(
+            metadata.cargo_binary_fingerprint(),
+            &expected_role("cargo_executable").fingerprint
+        );
+        assert_eq!(
+            metadata.rustc_binary_fingerprint(),
+            &expected_role("rustc_executable").fingerprint
+        );
+        assert_eq!(
+            metadata.target_linker_relative_path(),
+            expected_role("target_linker_executable").relative_path
+        );
+        assert_eq!(
+            metadata.target_linker_fingerprint(),
+            &expected_role("target_linker_executable").fingerprint
+        );
+        assert_eq!(
+            metadata.target_archiver_relative_path(),
+            expected_role("target_archiver_executable").relative_path
+        );
+        assert_eq!(
+            metadata.target_archiver_fingerprint(),
+            &expected_role("target_archiver_executable").fingerprint
+        );
         assert_eq!(
             fs::read(destination.join("cargo-home/config.toml")).unwrap(),
             b"[net]\noffline = true\n"
@@ -1504,6 +1929,80 @@ mod tests {
         )
         .unwrap();
         assert!(materialized.ensure_unchanged().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn materialized_tree_retains_inventory_and_archive_bytes_sticky_after_restore() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for relative in ["build/input-inventory.json", "build/input-files.bia"] {
+            let (campaign, store) = self::store();
+            let inputs_root = tempfile::tempdir().unwrap();
+            let captured = capture_fixed_build_inventory(
+                &store,
+                CAMPAIGN_ID,
+                TARGET_TRIPLE,
+                false,
+                complete_public_inputs(inputs_root.path()),
+            )
+            .unwrap();
+            let destination_parent = tempfile::tempdir().unwrap();
+            let materialized =
+                materialize_fixed_build_inputs(captured, &destination_parent.path().join("inputs"))
+                    .unwrap();
+            let path = campaign.path().join("campaign").join(relative);
+            let original = fs::read(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            let mut changed = original.clone();
+            changed[0] ^= 1;
+            fs::write(&path, &changed).unwrap();
+            assert_eq!(
+                materialized.ensure_unchanged().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+            fs::write(&path, &original).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+            assert_eq!(
+                materialized.ensure_unchanged().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn materialized_tree_rejects_fixed_role_replacement_and_stays_poisoned_after_restore() {
+        for relative in ["build/input-inventory.json", "build/input-files.bia"] {
+            let (campaign, store) = self::store();
+            let inputs_root = tempfile::tempdir().unwrap();
+            let captured = capture_fixed_build_inventory(
+                &store,
+                CAMPAIGN_ID,
+                TARGET_TRIPLE,
+                false,
+                complete_public_inputs(inputs_root.path()),
+            )
+            .unwrap();
+            let destination_parent = tempfile::tempdir().unwrap();
+            let materialized =
+                materialize_fixed_build_inputs(captured, &destination_parent.path().join("inputs"))
+                    .unwrap();
+            let path = campaign.path().join("campaign").join(relative);
+            let displaced = path.with_extension("displaced");
+            let original = fs::read(&path).unwrap();
+            fs::rename(&path, &displaced).unwrap();
+            fs::write(&path, &original).unwrap();
+            assert_eq!(
+                materialized.ensure_unchanged().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+            fs::remove_file(&path).unwrap();
+            fs::rename(&displaced, &path).unwrap();
+            assert_eq!(
+                materialized.ensure_unchanged().unwrap_err().to_string(),
+                "materialization rejected"
+            );
+        }
     }
 
     #[test]
@@ -1781,7 +2280,7 @@ mod tests {
             MemberReplacement,
             InjectedExtra,
             SpecialMode,
-            RestoredDirectoryMode,
+            ObservedRestoredDirectoryMode,
             ManyUnexpectedEntries,
             DirectoryFileReplacement,
         }
@@ -1791,7 +2290,7 @@ mod tests {
             Fault::MemberReplacement,
             Fault::InjectedExtra,
             Fault::SpecialMode,
-            Fault::RestoredDirectoryMode,
+            Fault::ObservedRestoredDirectoryMode,
             Fault::ManyUnexpectedEntries,
             Fault::DirectoryFileReplacement,
         ] {
@@ -1839,10 +2338,10 @@ mod tests {
                 Fault::SpecialMode => {
                     fs::set_permissions(&member, fs::Permissions::from_mode(0o2444)).unwrap();
                 }
-                Fault::RestoredDirectoryMode => {
-                    let directory = destination.join("cargo-home");
-                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
-                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+                Fault::ObservedRestoredDirectoryMode => {
+                    set_relative_mode(&destination, "cargo-home", 0o755);
+                    assert!(materialized.store.verify_exact_tree_for_test().is_err());
+                    set_relative_mode(&destination, "cargo-home", 0o555);
                 }
                 Fault::ManyUnexpectedEntries => {
                     fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();

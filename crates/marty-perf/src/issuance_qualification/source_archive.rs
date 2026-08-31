@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use marty_perf_schema::ArtifactFingerprint;
 
 use super::artifact_store::{
-    fingerprint_exact_source, CampaignArtifactStore, MaterializedInputStore,
-    MaterializedInputStoreBuilder, PersistedSourceArchiveBytes,
+    fingerprint_exact_source, CampaignArtifactStore, MaterializedInputParent,
+    MaterializedInputStore, MaterializedInputStoreBuilder, PersistedSourceArchiveBytes,
 };
 use super::{
     ensure_file_unchanged, fingerprint, valid_artifact_fingerprint, valid_campaign_id,
@@ -46,6 +46,7 @@ pub(super) struct RetainedSourceArchive {
     cargo_lock_fingerprint: ArtifactFingerprint,
     committer_timestamp: u64,
     members: Vec<RetainedSourceMember>,
+    invalid: Cell<bool>,
 }
 
 struct RetainedSourceMember {
@@ -89,9 +90,24 @@ impl RetainedSourceArchive {
     }
 
     pub(super) fn ensure_unchanged(&self) -> Result<()> {
-        self.persisted
-            .ensure_unchanged()
-            .map_err(|_| anyhow::anyhow!(RETENTION_REJECTED))
+        anyhow::ensure!(!self.invalid.get(), RETENTION_REJECTED);
+        let result = self.persisted.ensure_unchanged();
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!(RETENTION_REJECTED))
+    }
+
+    pub(super) fn ensure_materialization_preflight(&self) -> Result<()> {
+        anyhow::ensure!(!self.invalid.get(), MATERIALIZATION_REJECTED);
+        let result = (|| {
+            anyhow::ensure!(valid_materialization_plan(self), MATERIALIZATION_REJECTED);
+            self.ensure_unchanged()
+        })();
+        if result.is_err() {
+            self.invalid.set(true);
+        }
+        result.map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))
     }
 }
 
@@ -112,6 +128,13 @@ impl fmt::Debug for MaterializedSourceTree {
 }
 
 impl MaterializedSourceTree {
+    pub(super) fn store(&self) -> &MaterializedInputStore {
+        &self.store
+    }
+    pub(super) fn absolute_root(&self) -> &Path {
+        self.store.absolute_root()
+    }
+
     pub(super) fn member_count(&self) -> usize {
         self.member_count
     }
@@ -150,9 +173,34 @@ impl MaterializedSourceTree {
     }
 
     fn ensure_unchanged_inner(&self) -> Result<()> {
-        self.retained.persisted.ensure_unchanged()?;
+        self.retained.ensure_unchanged()?;
         self.store.verify_root()?;
-        self.retained.persisted.ensure_unchanged()
+        self.retained.ensure_unchanged()
+    }
+
+    /// Deliberately corrupts the retained archive for the fixed-build composition test.
+    #[cfg(all(test, unix))]
+    pub(super) fn overwrite_retained_archive_byte_for_test(&mut self, byte: u8) -> Result<u8> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = self.retained.persisted.absolute_path_for_test();
+        let original_permissions = std::fs::metadata(&path)?.permissions();
+        std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(original_permissions.mode() | 0o200),
+        )?;
+        let mut archive = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        archive.seek(SeekFrom::Start(0))?;
+        let mut original = [0_u8; 1];
+        archive.read_exact(&mut original)?;
+        archive.seek(SeekFrom::Start(0))?;
+        archive.write_all(&[byte])?;
+        archive.sync_all()?;
+        std::fs::set_permissions(path, original_permissions)?;
+        Ok(original[0])
     }
 }
 
@@ -264,6 +312,13 @@ fn retained_source_members(
         .iter()
         .zip(&validated.member_ranges)
         .map(|(entry, range)| {
+            if entry
+                .repository_relative_path
+                .split('/')
+                .any(|component| component.eq_ignore_ascii_case(".cargo"))
+            {
+                return None;
+            }
             let executable = match entry.git_mode.as_str() {
                 "100644" => false,
                 "100755" => true,
@@ -288,6 +343,7 @@ fn retained_source_members(
     Ok(members)
 }
 
+#[cfg(test)]
 fn create_source_tree_builder(
     absolute_destination: &Path,
     maximum_members: u32,
@@ -302,20 +358,10 @@ fn create_source_tree_builder(
 
 fn materialize_inner(
     mut retained: RetainedSourceArchive,
-    absolute_destination: &Path,
+    mut store: MaterializedInputStoreBuilder,
     mut post_member: impl FnMut(usize),
 ) -> Result<MaterializedSourceTree> {
-    anyhow::ensure!(
-        valid_materialization_plan(&retained),
-        MATERIALIZATION_REJECTED
-    );
-    retained
-        .persisted
-        .ensure_unchanged()
-        .map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))?;
-    let maximum_members =
-        u32::try_from(retained.members.len()).context(MATERIALIZATION_REJECTED)?;
-    let mut store = create_source_tree_builder(absolute_destination, maximum_members)?;
+    ensure_materialization_preflight(&retained)?;
     let members = std::mem::take(&mut retained.members);
     let member_count = members.len();
     for (ordinal, member) in members.iter().enumerate() {
@@ -346,10 +392,7 @@ fn materialize_inner(
         );
         post_member(ordinal);
     }
-    retained
-        .persisted
-        .ensure_unchanged()
-        .map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))?;
+    retained.ensure_unchanged()?;
     let store = store
         .seal()
         .map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))?;
@@ -363,12 +406,34 @@ fn materialize_inner(
     Ok(materialized)
 }
 
+fn ensure_materialization_preflight(retained: &RetainedSourceArchive) -> Result<()> {
+    retained.ensure_materialization_preflight()
+}
+
 /// Materializes every validated member into one new immutable source tree.
+#[cfg(test)]
 pub(super) fn materialize_retained_source_tree(
     retained: RetainedSourceArchive,
     absolute_destination: &Path,
 ) -> Result<MaterializedSourceTree> {
-    materialize_inner(retained, absolute_destination, |_| {})
+    ensure_materialization_preflight(&retained)?;
+    let maximum_members =
+        u32::try_from(retained.members.len()).context(MATERIALIZATION_REJECTED)?;
+    let store = create_source_tree_builder(absolute_destination, maximum_members)?;
+    materialize_inner(retained, store, |_| {})
+        .map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))
+}
+
+pub(super) fn materialize_retained_source_tree_in_parent(
+    retained: RetainedSourceArchive,
+    parent: &MaterializedInputParent,
+) -> Result<MaterializedSourceTree> {
+    ensure_materialization_preflight(&retained)?;
+    let maximum_members =
+        u32::try_from(retained.members.len()).context(MATERIALIZATION_REJECTED)?;
+    let store =
+        parent.create_child_builder("worktree", maximum_members, MAX_SOURCE_ARCHIVE_V1_BYTES)?;
+    materialize_inner(retained, store, |_| {})
         .map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))
 }
 
@@ -378,7 +443,11 @@ fn materialize_with_post_member_hook(
     absolute_destination: &Path,
     post_member: impl FnMut(usize),
 ) -> Result<MaterializedSourceTree> {
-    materialize_inner(retained, absolute_destination, post_member)
+    ensure_materialization_preflight(&retained)?;
+    let maximum_members =
+        u32::try_from(retained.members.len()).context(MATERIALIZATION_REJECTED)?;
+    let store = create_source_tree_builder(absolute_destination, maximum_members)?;
+    materialize_inner(retained, store, post_member)
         .map_err(|_| anyhow::anyhow!(MATERIALIZATION_REJECTED))
 }
 
@@ -483,6 +552,7 @@ fn retain_inner(
         cargo_lock_fingerprint: expected_cargo_lock_fingerprint.clone(),
         committer_timestamp: validated.committer_timestamp,
         members,
+        invalid: Cell::new(false),
     })
 }
 
@@ -529,7 +599,7 @@ fn retain_with_post_read_hook(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::io::{self, Cursor, Read};
@@ -572,6 +642,10 @@ mod tests {
     }
 
     fn fixture_with_lib_mode(lib_mode: &str) -> Fixture {
+        fixture_with_lib_path_and_mode("src/lib.rs", lib_mode)
+    }
+
+    fn fixture_with_lib_path_and_mode(lib_path: &str, lib_mode: &str) -> Fixture {
         let contents = [b"lock\n".as_slice(), b"pub fn fixture() {}\n".as_slice()];
         let mut manifest = SourceArchiveManifestWire {
             schema: "marty.performance/sd-jwt-issuance-source-archive-manifest/v1".to_owned(),
@@ -587,7 +661,7 @@ mod tests {
                     artifact_fingerprint: fingerprint(contents[0]),
                 },
                 SourceArchiveEntryWire {
-                    repository_relative_path: "src/lib.rs".to_owned(),
+                    repository_relative_path: lib_path.to_owned(),
                     git_mode: lib_mode.to_owned(),
                     git_object_id: hex::encode(production_git_object_id("blob", contents[1])),
                     artifact_fingerprint: fingerprint(contents[1]),
@@ -692,6 +766,13 @@ mod tests {
         )
         .unwrap();
         (temporary, retained)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn retained_fixture_for_fixed_build_composition_test(
+    ) -> (tempfile::TempDir, RetainedSourceArchive) {
+        let fixture = fixture();
+        retained_fixture(&fixture)
     }
 
     #[test]
@@ -1374,6 +1455,33 @@ mod tests {
             }
             let error = retained.ensure_unchanged().unwrap_err();
             assert_redacted(&error);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn retained_root_and_source_rename_restore_history_is_sticky() {
+        for target in ["root", "source"] {
+            for restore_before_first_check in [true, false] {
+                let fixture = fixture();
+                let (temporary, retained) = retained_fixture(&fixture);
+                let root = temporary.path().join("campaign");
+                let (original, displaced) = if target == "root" {
+                    (root.clone(), temporary.path().join("displaced-campaign"))
+                } else {
+                    (root.join("source"), root.join("displaced-source"))
+                };
+
+                fs::rename(&original, &displaced).unwrap();
+                if restore_before_first_check {
+                    fs::rename(&displaced, &original).unwrap();
+                }
+                assert_redacted(&retained.ensure_unchanged().unwrap_err());
+                if !restore_before_first_check {
+                    fs::rename(&displaced, &original).unwrap();
+                }
+                assert_redacted(&retained.ensure_unchanged().unwrap_err());
+            }
         }
     }
 

@@ -177,9 +177,10 @@ bound Git tree. The complete archive is capped at 16 MiB, its manifest at
 ASCII paths are unsigned-byte sorted, at most 1,024 bytes and 256 segments,
 with a 255-byte segment limit. Drive and ADS syntax, device names, trailing-dot
 aliases, case-fold collisions, and file/directory-prefix conflicts reject.
-Every path component whose ASCII case-folded form is exactly `.git` also
-rejects, including a root `.git` file or nested administrative directory;
-ordinary `.gitignore`, `.gitattributes`, and `.gitmodules` files remain valid.
+Every path component whose ASCII case-folded form is exactly `.git` or
+`.cargo` also rejects, including a root administrative file or nested
+administrative directory; ordinary `.gitignore`, `.gitattributes`, and
+`.gitmodules` files remain valid.
 Extraction uses directory-handle-relative, no-follow, create-new operations and
 verifies each opened handle remains beneath the build root, including on a
 case-folding or normalization-lossy target filesystem. The outer fingerprint
@@ -235,10 +236,14 @@ It preserves one Rust distribution layout under `ROOT/inputs/toolchain`, with
 Cargo and rustc in `toolchain/bin` and the matching sysroot below the same
 root. `CARGO_HOME` is exactly `ROOT/inputs/cargo-home`, and its retained
 configuration is the Cargo-discovered `ROOT/inputs/cargo-home/config.toml`;
+its exact retained bytes are `[net]\noffline = true\n` (the two `\n`
+sequences denote LF bytes, including the terminal LF), with no other table or
+field;
 `RUSTC` is the retained toolchain member; `rustc --print sysroot` must report
 `ROOT/inputs/toolchain`; and `PATH` begins with that distribution's `bin`
 directory. The target triple is 1 through 128 ASCII alphanumeric, hyphen,
-underscore, or dot bytes. The target linker environment entry contains the
+underscore, or dot bytes, but exact `.`, exact `..`, exact `host-tuple`, and
+every ASCII case-insensitive `.json` suffix are excluded. The target linker environment entry contains the
 concrete derived name, such as
 `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER`, never a template, and resolves to
 the unique retained linker member selected by the inventory.

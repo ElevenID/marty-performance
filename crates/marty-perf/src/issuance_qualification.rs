@@ -2703,7 +2703,14 @@ fn parse_source_archive_manifest(bytes: &[u8]) -> Option<SourceArchiveManifestWi
 #[derive(Clone)]
 struct ValidatedSourceArchive {
     manifest: SourceArchiveManifestWire,
+    member_ranges: Vec<ValidatedSourceArchiveMemberRange>,
     committer_timestamp: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedSourceArchiveMemberRange {
+    offset: u64,
+    byte_length: u64,
 }
 
 fn validate_source_archive_bytes(
@@ -2727,13 +2734,22 @@ fn validate_source_archive_bytes(
     let commit_length = take_u64_be(bytes, &mut cursor)?;
     let commit = take_bounded(bytes, &mut cursor, commit_length, maximum_commit_bytes)?;
     let mut contents = Vec::with_capacity(manifest.entries.len());
+    let mut member_ranges = Vec::with_capacity(manifest.entries.len());
     for entry in &manifest.entries {
         let content_length = take_u64_be(bytes, &mut cursor)?;
+        let content_offset = u64::try_from(cursor).ok()?;
         let content = take_bounded(bytes, &mut cursor, content_length, maximum_archive_bytes)?;
-        if fingerprint(content).ok().as_ref() != Some(&entry.artifact_fingerprint) {
+        let byte_length = u64::try_from(content.len()).ok()?;
+        if byte_length != entry.artifact_fingerprint.byte_length
+            || fingerprint(content).ok().as_ref() != Some(&entry.artifact_fingerprint)
+        {
             return None;
         }
         contents.push(content);
+        member_ranges.push(ValidatedSourceArchiveMemberRange {
+            offset: content_offset,
+            byte_length,
+        });
     }
     let source_tree = hex::encode(reconstructed_source_tree(&manifest.entries, &contents)?);
     let cargo_lock_matches = manifest
@@ -2752,6 +2768,7 @@ fn validate_source_archive_bytes(
         && cargo_lock_matches)
         .then_some(ValidatedSourceArchive {
             manifest,
+            member_ranges,
             committer_timestamp,
         })
 }

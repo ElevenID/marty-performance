@@ -673,6 +673,11 @@ impl PersistedSourceArchiveBytes {
         &self.fingerprint
     }
 
+    /// Returns the bound read-only handle for checked seeking by the source-archive layer.
+    pub(super) fn retained_file_mut(&mut self) -> &mut fs::File {
+        &mut self.file
+    }
+
     fn verify_root_binding(&self) -> Result<()> {
         anyhow::ensure!(
             verified_directory_identity(&self.root, "source archive root")? == self.root_identity,

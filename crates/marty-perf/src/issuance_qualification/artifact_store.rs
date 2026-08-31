@@ -4,18 +4,22 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+};
 
 use anyhow::{Context, Result};
-use fs_at::{OpenOptions as AtOpenOptions, OpenOptionsWriteMode};
+use fs_at::{read_dir as read_dir_at, OpenOptions as AtOpenOptions, OpenOptionsWriteMode};
 use marty_perf_schema::ArtifactFingerprint;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::schedule::{ArtifactPath, ArtifactRole, ScheduledProcess};
 use super::{
-    ensure_file_unchanged, open_absolute_directory, verified_directory_identity,
-    verified_file_snapshot, FileIdentity, FileSnapshot, MAX_FIXED_BUILD_INPUT_BYTES,
-    MAX_SOURCE_ARCHIVE_V1_BYTES,
+    ensure_file_unchanged, handle_snapshot, open_absolute_directory, open_child_directory,
+    open_child_file, verified_directory_identity, verified_file_snapshot, FileIdentity,
+    FileSnapshot, MAX_FIXED_BUILD_INPUT_BYTES, MAX_SOURCE_ARCHIVE_V1_BYTES,
 };
 
 const BUILD_INPUT_ARCHIVE_PATH: &str = "build/input-files.bia";
@@ -57,12 +61,380 @@ pub(super) struct CampaignArtifactStore {
     identity: FileIdentity,
 }
 
+pub(super) struct MaterializedInputStore {
+    absolute_root: PathBuf,
+    root: fs::File,
+    identity: FileIdentity,
+    sealed_snapshot: Cell<Option<FileSnapshot>>,
+    directories: RefCell<BTreeMap<Vec<OsString>, FileSnapshot>>,
+    members: RefCell<BTreeMap<Vec<OsString>, FileSnapshot>>,
+    sealed: Cell<bool>,
+}
+
+pub(super) struct MaterializedInputMember {
+    file: fs::File,
+    snapshot: FileSnapshot,
+    fingerprint: ArtifactFingerprint,
+    executable: bool,
+}
+
+impl MaterializedInputMember {
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    pub(super) fn ensure_unchanged(&self) -> Result<()> {
+        ensure_file_unchanged(&self.file, self.snapshot, "materialized build input")?;
+        verify_materialized_file_permissions(&self.file, self.executable)?;
+        let mut retained = &self.file;
+        anyhow::ensure!(
+            fingerprint_exact_source(&mut retained, self.fingerprint.byte_length)?
+                == self.fingerprint,
+            "materialized build input changed"
+        );
+        ensure_file_unchanged(&self.file, self.snapshot, "materialized build input")
+    }
+}
+
+impl MaterializedInputStore {
+    pub(super) fn create_new(absolute_root: &Path) -> Result<Self> {
+        anyhow::ensure!(absolute_root.is_absolute(), "materialization rejected");
+        ensure_directory_durability_supported().context("materialization rejected")?;
+        let parent_path = absolute_root.parent().context("materialization rejected")?;
+        let name = absolute_root
+            .file_name()
+            .context("materialization rejected")?;
+        anyhow::ensure!(
+            matches!(
+                absolute_root.components().next_back(),
+                Some(Component::Normal(_))
+            ) && !name.to_string_lossy().contains('\\'),
+            "materialization rejected"
+        );
+        let parent = open_absolute_directory(parent_path, "materialization parent")?;
+        let root = AtOpenOptions::default()
+            .mkdir_at(&parent, name)
+            .context("materialization rejected")?;
+        set_private_directory_permissions(&root).context("materialization rejected")?;
+        sync_directory(&root).context("materialization rejected")?;
+        sync_directory(&parent).context("materialization rejected")?;
+        let identity = verified_directory_identity(&root, "materialized input root")?;
+        Ok(Self {
+            absolute_root: absolute_root.to_owned(),
+            root,
+            identity,
+            sealed_snapshot: Cell::new(None),
+            directories: RefCell::new(BTreeMap::new()),
+            members: RefCell::new(BTreeMap::new()),
+            sealed: Cell::new(false),
+        })
+    }
+
+    pub(super) fn verify_root(&self) -> Result<()> {
+        self.verify_bound_snapshots()?;
+        let validation = self.verify_exact_tree();
+        let post_scan = self.verify_bound_snapshots();
+        post_scan?;
+        validation
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_root_with_post_scan_hook(&self, hook: impl FnOnce()) -> Result<()> {
+        self.verify_bound_snapshots()?;
+        let validation = self.verify_exact_tree();
+        hook();
+        let post_scan = self.verify_bound_snapshots();
+        post_scan?;
+        validation
+    }
+
+    fn verify_bound_snapshots(&self) -> Result<()> {
+        anyhow::ensure!(
+            verified_directory_identity(&self.root, "materialized input root")? == self.identity,
+            "materialization rejected"
+        );
+        if self.sealed.get() {
+            verify_materialized_directory_permissions(&self.root)?;
+            anyhow::ensure!(
+                self.sealed_snapshot.get()
+                    == Some(handle_snapshot(
+                        &self.root,
+                        true,
+                        "materialized input root"
+                    )?),
+                "materialization rejected"
+            );
+        }
+        let bound = open_absolute_directory(&self.absolute_root, "materialized input root")
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+        anyhow::ensure!(
+            verified_directory_identity(&bound, "materialized input root")? == self.identity,
+            "materialization rejected"
+        );
+        let directories = self
+            .directories
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for components in directories {
+            let directory = self.directory_for(&components)?;
+            if self.sealed.get() {
+                verify_materialized_directory_permissions(&directory)?;
+                anyhow::ensure!(
+                    self.directories.borrow().get(&components).copied()
+                        == Some(handle_snapshot(
+                            &directory,
+                            true,
+                            "materialized input directory",
+                        )?),
+                    "materialization rejected"
+                );
+            }
+        }
+        let members = self
+            .members
+            .borrow()
+            .iter()
+            .map(|(path, snapshot)| (path.clone(), *snapshot))
+            .collect::<Vec<_>>();
+        for (path, expected_snapshot) in members {
+            let (name, parents) = path.split_last().context("materialization rejected")?;
+            let parent = self.directory_for(parents)?;
+            let opened = open_child_file(
+                &parent,
+                name,
+                MAX_FIXED_BUILD_INPUT_BYTES,
+                "materialized build input",
+            )
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+            anyhow::ensure!(
+                opened.snapshot == expected_snapshot,
+                "materialization rejected"
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_exact_tree(&self) -> Result<()> {
+        let directories = self.directories.borrow();
+        let members = self.members.borrow();
+        let mut parents = directories.keys().cloned().collect::<Vec<_>>();
+        parents.push(Vec::new());
+        for parent_path in parents {
+            let mut directory = self.directory_for(&parent_path)?;
+            let depth = parent_path.len();
+            let expected = directories
+                .keys()
+                .chain(members.keys())
+                .filter(|path| path.len() == depth + 1 && path[..depth] == parent_path)
+                .map(|path| path[depth].clone())
+                .collect::<BTreeSet<_>>();
+            let mut actual = BTreeSet::new();
+            let mut observed = 0_usize;
+            for entry in read_dir_at(&mut directory)
+                .map_err(|_| anyhow::anyhow!("materialization rejected"))?
+            {
+                observed = observed
+                    .checked_add(1)
+                    .context("materialization rejected")?;
+                anyhow::ensure!(
+                    observed <= expected.len().saturating_add(2),
+                    "materialization rejected"
+                );
+                let name = entry
+                    .map_err(|_| anyhow::anyhow!("materialization rejected"))?
+                    .name()
+                    .to_owned();
+                if name != "." && name != ".." {
+                    anyhow::ensure!(
+                        expected.contains(&name) && actual.insert(name),
+                        "materialization rejected"
+                    );
+                }
+            }
+            anyhow::ensure!(actual == expected, "materialization rejected");
+        }
+        for (path, expected_snapshot) in members.iter() {
+            let (name, parents) = path.split_last().context("materialization rejected")?;
+            let parent = self.directory_for(parents)?;
+            let opened = open_child_file(
+                &parent,
+                name,
+                MAX_FIXED_BUILD_INPUT_BYTES,
+                "materialized build input",
+            )
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+            anyhow::ensure!(
+                opened.snapshot == *expected_snapshot,
+                "materialization rejected"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_exact_tree_for_test(&self) -> Result<()> {
+        self.verify_exact_tree()
+    }
+
+    pub(super) fn seal(&self) -> Result<()> {
+        let paths = self
+            .directories
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths.into_iter().rev() {
+            let directory = self.directory_for(&path)?;
+            set_materialized_directory_permissions(&directory)?;
+            sync_directory(&directory)?;
+            if let Some((_name, parent_path)) = path.split_last() {
+                let parent = self.directory_for(parent_path)?;
+                sync_directory(&parent)?;
+            }
+            verify_materialized_directory_permissions(&directory)?;
+            let snapshot = handle_snapshot(&directory, true, "materialized input directory")?;
+            self.directories.borrow_mut().insert(path, snapshot);
+        }
+        set_materialized_directory_permissions(&self.root)?;
+        sync_directory(&self.root)?;
+        let parent_path = self
+            .absolute_root
+            .parent()
+            .context("materialization rejected")?;
+        let parent = open_absolute_directory(parent_path, "materialization parent")?;
+        sync_directory(&parent)?;
+        verify_materialized_directory_permissions(&self.root)?;
+        self.sealed_snapshot.set(Some(handle_snapshot(
+            &self.root,
+            true,
+            "materialized input root",
+        )?));
+        self.sealed.set(true);
+        self.verify_root()
+    }
+
+    fn directory_for(&self, components: &[OsString]) -> Result<fs::File> {
+        let mut directory = self.root.try_clone().context("materialization rejected")?;
+        let mut prefix = Vec::with_capacity(components.len());
+        for component in components {
+            prefix.push(component.clone());
+            let expected = self.directories.borrow().get(&prefix).copied();
+            if let Some(expected) = expected {
+                directory =
+                    open_child_directory(&directory, component, "materialized input directory")
+                        .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+                anyhow::ensure!(
+                    verified_directory_identity(&directory, "materialized input directory")?
+                        == expected.identity,
+                    "materialization rejected"
+                );
+            } else {
+                let created = AtOpenOptions::default()
+                    .mkdir_at(&directory, component)
+                    .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+                set_private_directory_permissions(&created).context("materialization rejected")?;
+                sync_directory(&created).context("materialization rejected")?;
+                sync_directory(&directory).context("materialization rejected")?;
+                let snapshot = handle_snapshot(&created, true, "materialized input directory")?;
+                self.directories
+                    .borrow_mut()
+                    .insert(prefix.clone(), snapshot);
+                directory = created;
+            }
+        }
+        Ok(directory)
+    }
+
+    pub(super) fn write_member(
+        &self,
+        relative_path: &str,
+        executable: bool,
+        expected: &ArtifactFingerprint,
+        emit: impl FnOnce(&mut dyn Write) -> Result<()>,
+    ) -> Result<MaterializedInputMember> {
+        anyhow::ensure!(!self.sealed.get(), "materialization rejected");
+        self.verify_root()?;
+        let mut components =
+            validated_components(Path::new(relative_path)).context("materialization rejected")?;
+        let name = components.pop().context("materialization rejected")?;
+        let parent = self.directory_for(&components)?;
+        let mut member_path = components.clone();
+        member_path.push(name.clone());
+        let mut options = AtOpenOptions::default();
+        options
+            .read(true)
+            .write(OpenOptionsWriteMode::Write)
+            .create_new(true)
+            .follow(false);
+        let mut file = options
+            .open_at(&parent, &name)
+            .context("materialization rejected")?;
+        let fingerprint = {
+            let mut writer = ExactFingerprintWriter::new(
+                &mut file,
+                expected.byte_length,
+                MAX_FIXED_BUILD_INPUT_BYTES,
+            )?;
+            emit(&mut writer).context("materialization rejected")?;
+            writer.finish().context("materialization rejected")?
+        };
+        anyhow::ensure!(&fingerprint == expected, "materialization rejected");
+        set_materialized_file_permissions(&file, executable).context("materialization rejected")?;
+        verify_materialized_file_permissions(&file, executable)
+            .context("materialization rejected")?;
+        file.flush().context("materialization rejected")?;
+        file.sync_all().context("materialization rejected")?;
+        sync_directory(&parent).context("materialization rejected")?;
+        let snapshot = verified_file_snapshot(
+            &file,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+            "materialized build input",
+        )?;
+        anyhow::ensure!(
+            snapshot.readonly
+                && snapshot.link_count == 1
+                && snapshot.byte_length == expected.byte_length,
+            "materialization rejected"
+        );
+        ensure_file_unchanged(&file, snapshot, "materialized build input")?;
+        drop(file);
+        let opened = open_child_file(
+            &parent,
+            &name,
+            MAX_FIXED_BUILD_INPUT_BYTES,
+            "materialized build input",
+        )
+        .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+        let mut retained = opened.file;
+        let retained_snapshot = opened.snapshot;
+        anyhow::ensure!(retained_snapshot == snapshot, "materialization rejected");
+        let retained_fingerprint = fingerprint_exact_source(&mut retained, expected.byte_length)?;
+        anyhow::ensure!(
+            &retained_fingerprint == expected,
+            "materialization rejected"
+        );
+        verify_materialized_file_permissions(&retained, executable)?;
+        ensure_file_unchanged(&retained, snapshot, "materialized build input")?;
+        self.members.borrow_mut().insert(member_path, snapshot);
+        self.verify_root()?;
+        Ok(MaterializedInputMember {
+            file: retained,
+            snapshot,
+            fingerprint: retained_fingerprint,
+            executable,
+        })
+    }
+}
+
 /// Store-bound proof that bytes were durably persisted at the fixed build-input archive role.
 ///
 /// This capability attests only to persistence, identity, and fingerprinting. The later
 /// build-input slice remains responsible for validating archive framing and member semantics.
 pub(super) struct PersistedBuildInputArchiveBytes {
     root_identity: FileIdentity,
+    file: fs::File,
     snapshot: FileSnapshot,
     fingerprint: ArtifactFingerprint,
 }
@@ -70,6 +442,7 @@ pub(super) struct PersistedBuildInputArchiveBytes {
 /// Store-bound proof that canonical build-input inventory bytes were durably persisted.
 pub(super) struct PersistedBuildInputInventoryBytes {
     root_identity: FileIdentity,
+    file: fs::File,
     snapshot: FileSnapshot,
     fingerprint: ArtifactFingerprint,
 }
@@ -79,12 +452,28 @@ impl PersistedBuildInputArchiveBytes {
     pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
         &self.fingerprint
     }
+
+    pub(super) fn retained_file_mut(&mut self) -> &mut fs::File {
+        &mut self.file
+    }
+
+    pub(super) fn ensure_unchanged(&self) -> Result<()> {
+        ensure_file_unchanged(&self.file, self.snapshot, "build-input archive")
+    }
 }
 
 impl PersistedBuildInputInventoryBytes {
     /// Returns the fingerprint of the durably retained inventory bytes.
     pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
         &self.fingerprint
+    }
+
+    pub(super) fn retained_file_mut(&mut self) -> &mut fs::File {
+        &mut self.file
+    }
+
+    pub(super) fn ensure_unchanged(&self) -> Result<()> {
+        ensure_file_unchanged(&self.file, self.snapshot, "build-input inventory")
     }
 
     /// Confirms that inventory and archive persistence capabilities share one campaign store.
@@ -138,7 +527,7 @@ impl CampaignArtifactStore {
         emit: impl FnOnce(&mut dyn Write) -> Result<()>,
     ) -> Result<PersistedBuildInputArchiveBytes> {
         let path = ArtifactPath::canonical(BUILD_INPUT_ARCHIVE_PATH.into())?;
-        let (snapshot, fingerprint) = self.write_streamed_create_new(
+        let (file, snapshot, fingerprint) = self.write_streamed_create_new(
             &path,
             expected_length,
             MAX_FIXED_BUILD_INPUT_BYTES,
@@ -146,6 +535,7 @@ impl CampaignArtifactStore {
         )?;
         Ok(PersistedBuildInputArchiveBytes {
             root_identity: self.identity,
+            file,
             snapshot,
             fingerprint,
         })
@@ -157,7 +547,7 @@ impl CampaignArtifactStore {
     ) -> Result<PersistedBuildInputInventoryBytes> {
         let path = ArtifactPath::canonical(BUILD_INPUT_INVENTORY_PATH.into())?;
         let expected_length = u64::try_from(bytes.len()).context("artifact length overflow")?;
-        let (snapshot, fingerprint) = self.write_streamed_create_new(
+        let (file, snapshot, fingerprint) = self.write_streamed_create_new(
             &path,
             expected_length,
             MAX_SOURCE_ARCHIVE_V1_BYTES,
@@ -168,6 +558,7 @@ impl CampaignArtifactStore {
         )?;
         Ok(PersistedBuildInputInventoryBytes {
             root_identity: self.identity,
+            file,
             snapshot,
             fingerprint,
         })
@@ -197,15 +588,16 @@ impl CampaignArtifactStore {
             .mkdir_at(&parent, name)
             .context("create campaign root")?;
         set_private_directory_permissions(&created)?;
+        let created_identity = verified_directory_identity(&created, "campaign root")?;
         sync_directory(&created).context("sync campaign root")?;
         sync_directory(&parent).context("sync campaign root parent")?;
         drop(created);
-        let mut reopen = AtOpenOptions::default();
-        reopen.read(true).follow(false);
-        let root = reopen
-            .open_dir_at(&parent, name)
-            .context("reopen campaign root")?;
+        let root = open_child_directory(&parent, &name.to_os_string(), "campaign root")?;
         let identity = verified_directory_identity(&root, "campaign root")?;
+        anyhow::ensure!(
+            identity == created_identity,
+            "campaign root identity changed"
+        );
         Ok(Self {
             absolute_root: absolute_root.to_owned(),
             root,
@@ -268,12 +660,7 @@ impl CampaignArtifactStore {
             .try_clone()
             .context("clone campaign root handle")?;
         for component in components {
-            let mut options = AtOpenOptions::default();
-            options.read(true).follow(false);
-            directory = options
-                .open_dir_at(&directory, component)
-                .context("open campaign directory")?;
-            verified_directory_identity(&directory, "campaign directory")?;
+            directory = open_child_directory(&directory, component, "campaign directory")?;
         }
         Ok(directory)
     }
@@ -320,7 +707,7 @@ impl CampaignArtifactStore {
         self.write_streamed_create_new(path, expected_length, maximum, |writer| {
             copy_exact_source(&mut reader, writer, expected_length)
         })
-        .map(|(_, fingerprint)| fingerprint)
+        .map(|(_, _, fingerprint)| fingerprint)
     }
 
     fn write_streamed_create_new(
@@ -329,7 +716,7 @@ impl CampaignArtifactStore {
         expected_length: u64,
         maximum: u64,
         emit: impl FnOnce(&mut dyn Write) -> Result<()>,
-    ) -> Result<(FileSnapshot, ArtifactFingerprint)> {
+    ) -> Result<(fs::File, FileSnapshot, ArtifactFingerprint)> {
         anyhow::ensure!(
             expected_length <= maximum,
             "campaign artifact exceeds byte limit"
@@ -377,7 +764,7 @@ impl CampaignArtifactStore {
             self.reopen_bound_artifact(&components, &name, parent_identity, snapshot, maximum)?;
         self.verify_root()?;
         ensure_file_unchanged(&final_reopen, snapshot, "campaign artifact")?;
-        Ok((snapshot, retained_fingerprint))
+        Ok((final_reopen, snapshot, retained_fingerprint))
     }
 
     fn reopen_bound_artifact(
@@ -394,16 +781,12 @@ impl CampaignArtifactStore {
                 == expected_parent_identity,
             "campaign artifact parent identity changed"
         );
-        let mut options = AtOpenOptions::default();
-        options.read(true).follow(false);
-        let file = options
-            .open_at(&parent, name)
-            .context("reopen campaign artifact")?;
+        let opened = open_child_file(&parent, name, maximum, "campaign artifact")?;
         anyhow::ensure!(
-            verified_file_snapshot(&file, maximum, "campaign artifact")? == expected_snapshot,
+            opened.snapshot == expected_snapshot,
             "campaign artifact path binding changed"
         );
-        Ok(file)
+        Ok(opened.file)
     }
 }
 
@@ -647,6 +1030,78 @@ fn set_private_file_permissions(file: &fs::File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .context("set private campaign artifact permissions")
+}
+
+#[cfg(unix)]
+fn set_materialized_file_permissions(file: &fs::File, executable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if executable { 0o555 } else { 0o444 };
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .context("set materialized build-input permissions")
+}
+
+#[cfg(unix)]
+fn set_materialized_directory_permissions(directory: &fs::File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o555))
+        .context("seal materialized input directory")
+}
+
+#[cfg(unix)]
+fn verify_materialized_directory_permissions(directory: &fs::File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    anyhow::ensure!(
+        directory.metadata()?.permissions().mode() & 0o7777 == 0o555,
+        "materialized input directory mode changed"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_materialized_file_permissions(file: &fs::File, executable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let expected = if executable { 0o555 } else { 0o444 };
+    anyhow::ensure!(
+        file.metadata()?.permissions().mode() & 0o7777 == expected,
+        "materialized build-input mode changed"
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_materialized_file_permissions(file: &fs::File, _executable: bool) -> Result<()> {
+    let mut permissions = file.metadata()?.permissions();
+    permissions.set_readonly(true);
+    file.set_permissions(permissions)
+        .context("set materialized build-input permissions")
+}
+
+#[cfg(not(unix))]
+fn set_materialized_directory_permissions(directory: &fs::File) -> Result<()> {
+    let mut permissions = directory.metadata()?.permissions();
+    permissions.set_readonly(true);
+    directory
+        .set_permissions(permissions)
+        .context("seal materialized input directory")
+}
+
+#[cfg(not(unix))]
+fn verify_materialized_directory_permissions(directory: &fs::File) -> Result<()> {
+    anyhow::ensure!(
+        directory.metadata()?.permissions().readonly(),
+        "materialized input directory mode changed"
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_materialized_file_permissions(file: &fs::File, _executable: bool) -> Result<()> {
+    anyhow::ensure!(
+        file.metadata()?.permissions().readonly(),
+        "materialized build-input mode changed"
+    );
+    Ok(())
 }
 
 #[cfg(not(unix))]

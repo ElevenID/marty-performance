@@ -1576,6 +1576,20 @@ impl FixedArtifactRole {
 }
 
 impl CampaignArtifactStore {
+    /// Returns a duplicate of the currently bound campaign-root handle.
+    ///
+    /// The duplicate is an identity capability, not a pathname. Callers must retain it rather
+    /// than rediscovering the campaign root after capture.
+    pub(super) fn retained_root_handle(&self) -> Result<fs::File> {
+        self.verify_root_snapshot()?;
+        self.root.try_clone().context("clone campaign root")
+    }
+
+    /// Revalidates the create-only campaign-root binding and its current directory snapshot.
+    pub(super) fn ensure_retained_root_unchanged(&self) -> Result<()> {
+        self.verify_root_snapshot()
+    }
+
     pub(super) fn write_fixed_preimage(
         &self,
         role: FixedArtifactRole,

@@ -51,6 +51,11 @@ mod first_quiet_window;
     reason = "the nonactivating fixed-build preparation capability is future controller plumbing"
 )]
 mod fixed_build;
+#[allow(
+    dead_code,
+    reason = "the nonactivating fixed-build capture capability is future controller plumbing"
+)]
+mod fixed_build_capture;
 mod schedule;
 #[allow(
     dead_code,

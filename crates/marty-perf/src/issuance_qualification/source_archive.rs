@@ -854,6 +854,10 @@ impl RetainedSourceArchive {
         self.committer_timestamp
     }
 
+    pub(super) fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
     pub(super) fn ensure_unchanged(&self) -> Result<()> {
         anyhow::ensure!(!self.invalid.get(), RETENTION_REJECTED);
         let result = self.persisted.ensure_unchanged();

@@ -226,6 +226,35 @@ impl PersistedFixedBuildInputs {
     pub(super) fn ensure_materialization_preflight(&self) -> Result<()> {
         self.ensure_unchanged()
     }
+
+    /// Revalidates the retained canonical inventory and its exact capture coordinates.
+    pub(super) fn ensure_capture_coordinates(
+        &self,
+        campaign_id: &str,
+        target_triple: &str,
+    ) -> Result<()> {
+        self.ensure_unchanged()?;
+        let mut inventory_file = self.inventory.retained_file().try_clone()?;
+        inventory_file.seek(SeekFrom::Start(0))?;
+        let bytes = read_bounded_retained(&mut inventory_file, MAX_SOURCE_ARCHIVE_V1_BYTES)?;
+        anyhow::ensure!(
+            fingerprint(&bytes).is_ok_and(|actual| &actual == self.inventory.fingerprint()),
+            "materialization rejected"
+        );
+        let inventory: BuildInputInventory = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("materialization rejected"))?;
+        let windows = target_triple
+            .split('-')
+            .any(|component| component == "windows");
+        anyhow::ensure!(
+            inventory.campaign_id == campaign_id
+                && inventory.target_triple == target_triple
+                && valid_build_input_inventory(&inventory, windows, target_triple, campaign_id)
+                && canonical_pretty_bytes(&inventory).as_deref() == Some(bytes.as_slice()),
+            "materialization rejected"
+        );
+        self.ensure_unchanged()
+    }
 }
 
 /// Proof that every verified archive member was published into one new immutable tree.

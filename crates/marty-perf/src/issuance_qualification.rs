@@ -47,6 +47,11 @@ mod evidence_validation;
 )]
 mod first_quiet_window;
 mod schedule;
+#[allow(
+    dead_code,
+    reason = "the nonactivating retained source-archive capability is future controller plumbing"
+)]
+mod source_archive;
 mod statistics;
 
 use schedule::{

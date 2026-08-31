@@ -35,6 +35,11 @@ use uuid::{Uuid, Variant, Version};
     reason = "the nonactivating artifact store is consumed by the next controller slice"
 )]
 mod artifact_store;
+#[allow(
+    dead_code,
+    reason = "the nonactivating build-input archive kernel is future controller plumbing"
+)]
+mod build_input_archive;
 mod evidence_validation;
 #[allow(
     dead_code,

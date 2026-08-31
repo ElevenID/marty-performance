@@ -65,6 +65,13 @@ pub(super) struct PersistedBuildInputArchiveBytes {
     fingerprint: ArtifactFingerprint,
 }
 
+impl PersistedBuildInputArchiveBytes {
+    /// Returns the fingerprint of the durably retained archive bytes.
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum FixedArtifactRole {
     FirstQuietAttestation,

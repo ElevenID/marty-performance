@@ -45,9 +45,9 @@ pre-analysis protocol before building or timing:
       --manifest <canonical-manifest.json> \
       --output <absolute-new-plan.json>
 
-The offline analyzer validates the currently implemented artifact-integrity
-slice from fixed campaign roles without launching a controller, benchmark, or
-network request:
+The selected-route offline analyzer validates the currently implemented
+artifact-integrity slice from fixed campaign roles without launching a
+controller, benchmark, or network request:
 
     cargo run --locked -- qualification issuance analyze \
       --campaign-root <absolute-campaign-root> \
@@ -55,9 +55,35 @@ network request:
       --anchor-public-key <out-of-band-raw-32-byte-ed25519-key> \
       --output <absolute-new-analysis.json>
 
-It verifies the exact V3 plan/manifest binding, the coordinate-selected route
-record against the retained hardware profile, the source Git tree/commit and
-Cargo.lock, typed controller and monitor configurations, the typed build
+The indexed analyzer first applies that same trust and artifact-integrity
+pipeline, including the selected route supplied through `--route-artifact`.
+It then traverses the exact canonical Criterion and route indexes, validates
+all 10,560 Criterion estimate artifacts and all 10,560 route artifacts with
+separately checked aggregate byte counts, and produces 66 paired-cell results
+in manifest order:
+
+    cargo run --locked -- qualification issuance analyze-indexed \
+      --campaign-root <absolute-campaign-root> \
+      --route-artifact routes/r00_c00_e0.ndjson \
+      --anchor-public-key <out-of-band-raw-32-byte-ed25519-key> \
+      --output <absolute-new-indexed-analysis.json>
+
+Its plan-bound deterministic bootstrap reports the combined, serial-first,
+adaptive-first, and disclosed order effects as adaptive-over-serial log ratios
+and relative percentages. The first three effects use the predeclared
+simultaneous common-max-deviation interval; the order diagnostic uses its
+marginal Type 7 interval. Logarithms and exponentials use the exact pinned
+`libm 0.2.16` software implementation with architecture-specific paths disabled;
+bit-pattern goldens guard the supported-target result contract, and the report
+records `libm_0_2_16_force_soft_floats`. Criterion median point estimates are
+estimator outputs, not individual-operation p50, p95, or p99 latency. The
+indexed report therefore marks tail latency and throughput as `not_evaluated`,
+allocation and SIMD-lane evidence as `not_measured`, campaign qualification as
+`not_evaluated`, and production-threshold activation as `false`.
+
+Both commands verify the exact V3 plan/manifest binding, the coordinate-selected
+route record against the retained hardware profile, the source Git tree/commit
+and Cargo.lock, typed controller and monitor configurations, the typed build
 receipt and streamed build-input archive, installed binary fingerprints, the
 anchored genesis, the terminal segment's bounded record envelopes and footer
 summary, and both offline anchor signatures and their same-clock publication
@@ -73,18 +99,18 @@ lifecycle semantics. Structural inspection of non-footer envelopes in both
 inspected segments separately binds campaign, segment and contiguous record
 ordinals, exact UTC grammar, and nondecreasing monotonic values. Validation
 of the terminal segment footer alone additionally binds its header/footer
-time bounds and the five reconstructed terminal-segment type counters. The
-analyzer does not traverse or chain
-intermediate segments, or validate complete within-record and cross-record
-lifecycle semantics. Governed inputs are opened relative to
+time bounds and the five reconstructed terminal-segment type counters.
+Neither analyzer traverses or chains intermediate segments or validates
+complete within-record and cross-record lifecycle semantics. Governed inputs
+are opened relative to
 retained directory handles without following links; regular files must have
 one link and remain the same size, identity, and stable metadata through their
 exact-length read. Unix file and directory-component opens also set
 nonblocking and no-controlling-terminal flags before the retained-handle type
 check, so FIFO substitutions reject instead of waiting for a peer and device
-leaves cannot acquire a controlling terminal before type rejection. The
-output is deterministic create-new canonical JSON,
-published without replacement through a same-directory temporary file on
+leaves cannot acquire a controlling terminal before type rejection. Each
+output is deterministic create-new canonical JSON, published without
+replacement through a same-directory temporary file on
 supported local filesystems and synced as a file. Parent-directory durability
 is also synced on Unix; exact crash durability and no-replace rename behavior
 remain operating-system and filesystem properties. Temporary-file creation
@@ -92,30 +118,33 @@ and final publication are pathname-based, so the output-parent path and its
 ancestry must remain quiescent for the entire analysis; retained-handle checks
 make observed namespace changes fail closed but do not make publication
 race-resistant against a hostile concurrent ancestry swap. The destination
-must be outside the retained campaign root. Its scope is
+must be outside the retained campaign root. The selected-route report scope is
 `offline_artifact_integrity_subset_v1`; it always records campaign
 qualification as `not_evaluated` and production-threshold activation as
-`false`. Intermediate run-validity segment traversal and chain validation,
-lifecycle semantics, all route/Criterion artifacts, statistics, threshold
-discovery, and re-execution of the retained build tree's offline
-dependency-resolution probe remain separate future analyzer phases. The
-current slice verifies the receipt's exact probe command and retained result;
-it does not materialize that tree or run the command. It
-also does not validate first-quiet-window contents or prove the build began
-after that window. Run analysis only against a quiescent campaign directory or
+`false`. The indexed report scope is
+`all_indexed_route_and_criterion_estimate_artifacts_v1` and retains the same
+nonactivating decisions. Intermediate run-validity segment traversal and chain
+validation, lifecycle semantics, complete Criterion-home traversal, tail
+latency, throughput, allocation, SIMD-lane evidence, target-campaign threshold
+discovery, activation, and re-execution of the retained build tree's offline
+dependency-resolution probe remain separate future analyzer phases. Both
+commands verify the receipt's exact probe command and retained result; they do
+not materialize that tree or run the command. They also do not validate
+first-quiet-window contents or prove the build began after that window. Run
+analysis only against a quiescent campaign directory or
 an immutable filesystem snapshot: per-file handle binding does not make the
 multi-file traversal one atomic snapshot.
 
-The report is always nonactivating. If a file or parent durability/identity
+Both reports are always nonactivating. If a file or parent durability/identity
 check fails after the create-new publication step, the command returns an
-error, but the already published nonactivating report may remain. The analyzer
-does not attempt a pathname cleanup that could target a concurrently replaced
+error, but the already published nonactivating report may remain. Neither
+analyzer attempts a pathname cleanup that could target a concurrently replaced
 entry.
 
 `--anchor-public-key` is an operator-selected trust input. It must be an
-absolute, read-only, single-link 32-byte file outside the campaign tree. The
+absolute, read-only, single-link 32-byte file outside the campaign tree. Each
 analyzer proves that the campaign configuration and signatures bind that key;
-it does not prove that the key was independently preconfigured or trusted.
+neither proves that the key was independently preconfigured or trusted.
 
 The plan command rejects changed matrix cardinality, route or estimator
 versions, noncanonical bytes, activated production thresholds, reused
@@ -391,8 +420,10 @@ matching `base` and `new` copies of `benchmark.json`, `estimates.json`,
 Marty-owned JSON uses locked `serde_json` 1.0.151 typed round-trip bytes:
 unknown, duplicate, missing, nonfinite, wrongly typed, and trailing data are
 rejected. Route evidence has its own one-compact-record-plus-LF protocol.
-Criterion-owned files are opaque hashed bytes; only exact typed projections of
-the selected `new/benchmark.json` and `new/estimates.json` are interpreted.
+Criterion-owned files are opaque hashed bytes. Selected analysis interprets
+only its selected projection; indexed analysis interprets the exact Criterion
+0.5.1 projection of every indexed `new/estimates.json` while leaving the rest
+of each Criterion artifact home untraversed.
 Canonical Criterion and route indexes map all 10,560 coordinates to those
 artifacts. The route contract closes every stage, requested/effective route,
 work-status, budget-result, mode, and selection-reason literal. It freezes all
@@ -469,6 +500,13 @@ a marginal type-7 interval. Discovery gates use the exact relative-percent
 transform `100.0 * (exp(effect) - 1.0)`. It describes 10,560 fresh timing
 processes but does not execute them or activate a production threshold. Frozen
 v1 or v2 evidence must not be reinterpreted as v3.
+
+Fixed-build execution, complete Criterion artifact-home traversal,
+first-window and complete lifecycle validation, individual-operation tail
+latency, end-to-end throughput, allocation and SIMD/lane measurements, target
+campaign execution, threshold discovery, and production activation all remain
+later work. Indexed analysis never pools a target triple, hardware profile,
+fixed binary, build receipt, manifest, or plan with another campaign.
 
 ## Test window
 

@@ -12,18 +12,18 @@ use ed25519_dalek::{Signature, VerifyingKey};
 #[cfg(windows)]
 use fs_at::OpenOptions as AtOpenOptions;
 use marty_perf_schema::{
-    ArtifactFingerprint, SdJwtIssuanceArtifactIndexProtocol, SdJwtIssuanceBootstrapProtocol,
-    SdJwtIssuanceCriterionHomeProtocol, SdJwtIssuanceCriterionProtocol,
-    SdJwtIssuanceDiscoveryProtocol, SdJwtIssuanceEffectProtocol,
+    ArtifactFingerprint, SdJwtIssuanceAnalysisStatus, SdJwtIssuanceArtifactIndexProtocol,
+    SdJwtIssuanceBootstrapProtocol, SdJwtIssuanceCriterionHomeProtocol,
+    SdJwtIssuanceCriterionProtocol, SdJwtIssuanceDiscoveryProtocol, SdJwtIssuanceEffectProtocol,
     SdJwtIssuanceEvidenceFieldProtocol, SdJwtIssuanceEvidenceJsonType,
     SdJwtIssuanceEvidenceRecordProtocol, SdJwtIssuanceFirstQuietWindowProtocol,
     SdJwtIssuanceGlobalPreimageProtocol, SdJwtIssuanceGlobalRoundProtocol,
-    SdJwtIssuanceInvocationDescriptorProtocol, SdJwtIssuanceLaunchBarrierProtocol,
-    SdJwtIssuanceObservationBounds, SdJwtIssuanceQualificationManifest,
-    SdJwtIssuanceQualificationPlan, SdJwtIssuanceRouteArtifactProtocol,
-    SdJwtIssuanceRunValidityCompletionProtocol, SdJwtIssuanceRunValidityLimits,
-    SdJwtIssuanceRunValidityProtocol, SdJwtIssuanceRunValidityRecordProtocols,
-    MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES,
+    SdJwtIssuanceIndexedAnalysisReport, SdJwtIssuanceInvocationDescriptorProtocol,
+    SdJwtIssuanceLaunchBarrierProtocol, SdJwtIssuanceObservationBounds,
+    SdJwtIssuanceQualificationManifest, SdJwtIssuanceQualificationPlan,
+    SdJwtIssuanceRouteArtifactProtocol, SdJwtIssuanceRunValidityCompletionProtocol,
+    SdJwtIssuanceRunValidityLimits, SdJwtIssuanceRunValidityProtocol,
+    SdJwtIssuanceRunValidityRecordProtocols, MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha1::Sha1;
@@ -5512,7 +5512,7 @@ fn valid_analysis_output_file_name(value: &std::ffi::OsStr) -> bool {
 fn write_analysis_report(
     output_path: &Path,
     forbidden_directory: Option<FileIdentity>,
-    report: &IssuanceAnalysisReport,
+    report: &impl Serialize,
 ) -> Result<()> {
     anyhow::ensure!(output_path.is_absolute(), "analysis rejected: output");
     let parent = output_path.parent().context("analysis rejected: output")?;
@@ -5569,12 +5569,27 @@ fn write_analysis_report(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum AnalysisScope {
+    SelectedRoute,
+    IndexedTimingArtifacts,
+}
+
 /// Validate the bounded offline artifact-integrity slice of one V3 campaign.
+pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
+    analyze_with_scope(request, AnalysisScope::SelectedRoute)
+}
+
+/// Validate and analyze every indexed route and Criterion estimate artifact.
+pub(crate) fn analyze_indexed(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
+    analyze_with_scope(request, AnalysisScope::IndexedTimingArtifacts)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the ordered fail-closed verification pipeline keeps every cross-artifact binding visible"
 )]
-pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
+fn analyze_with_scope(request: &IssuanceAnalysisRequest<'_>, scope: AnalysisScope) -> Result<()> {
     let coordinate = schedule::QualificationSchedule::parse_route_path(request.route_artifact)
         .context("analysis rejected: route artifact role")?;
     let campaign = CampaignDirectory::open(request.campaign_root)?;
@@ -6066,55 +6081,150 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
         "analysis rejected: anchor binding"
     );
 
-    let report = IssuanceAnalysisReport {
-        schema: "marty.performance/sd-jwt-issuance-analysis/v1",
-        analysis_scope: "offline_artifact_integrity_subset_v1",
-        campaign_id: build_receipt.campaign_id,
-        manifest: manifest_fingerprint,
-        plan: plan_fingerprint,
-        selected_route_benchmark_id: route_expectation.full_benchmark_id.to_owned(),
-        selected_route_artifact: route_fingerprint,
-        source_archive: source_archive_fingerprint,
-        cargo_lock: cargo_lock_fingerprint,
-        hardware_profile: hardware_fingerprint,
-        build_receipt: build_receipt_fingerprint,
-        build_input_inventory: inventory_fingerprint,
-        build_input_archive: build_archive_fingerprint,
-        fixed_binary: fixed_binary_fingerprint,
-        terminal_observation_receipt: terminal_receipt_fingerprint,
-        terminal_observation_evidence: terminal_evidence_fingerprint,
-        completion: completion_fingerprint,
-        completion_anchor: completion_anchor_fingerprint,
-        checks: vec![
-            "v3_plan_and_manifest_binding",
-            "selected_route_identity_and_invariants",
-            "source_archive_git_tree_commit_and_cargo_lock",
-            "build_input_inventory_and_streamed_archive",
-            "anchored_genesis_build_receipt_and_binary_binding",
-            "terminal_segment_structural_envelope_and_footer_summary_binding",
-            "inspected_genesis_and_terminal_segment_lifecycle_payload_shape_and_canonicality",
-            "offline_ed25519_anchor_signatures_and_chronology",
-        ],
-        artifact_integrity_status: "valid",
-        campaign_qualification_status: "not_evaluated",
-        production_threshold_activation: false,
-        limitations: vec![
-            "one_selected_route_artifact_only",
-            "intermediate_segment_chain_and_lifecycle_payload_semantics_not_analyzed",
-            "first_quiet_window_evidence_content_and_build_order_not_analyzed",
-            "retained_build_tree_offline_probe_not_reexecuted",
-            "operator_selected_anchor_key_trust_provenance_not_established",
-            "cross_file_consistency_requires_quiescent_or_snapshotted_campaign",
-            "output_parent_ancestry_requires_quiescent_namespace",
-            "failed_post_publication_verification_may_leave_a_nonactivating_create_new_report",
-            "report_publication_crash_durability_depends_on_operating_system_and_filesystem",
-            "no_performance_or_threshold_claim",
-        ],
-    };
-    write_analysis_report(request.output, Some(campaign.identity), &report)?;
-    println!(
-        "Validated the bounded offline artifact-integrity slice; campaign qualification remains not evaluated."
-    );
+    match scope {
+        AnalysisScope::SelectedRoute => {
+            let report = IssuanceAnalysisReport {
+                schema: "marty.performance/sd-jwt-issuance-analysis/v1",
+                analysis_scope: "offline_artifact_integrity_subset_v1",
+                campaign_id: build_receipt.campaign_id,
+                manifest: manifest_fingerprint,
+                plan: plan_fingerprint,
+                selected_route_benchmark_id: route_expectation.full_benchmark_id.to_owned(),
+                selected_route_artifact: route_fingerprint,
+                source_archive: source_archive_fingerprint,
+                cargo_lock: cargo_lock_fingerprint,
+                hardware_profile: hardware_fingerprint,
+                build_receipt: build_receipt_fingerprint,
+                build_input_inventory: inventory_fingerprint,
+                build_input_archive: build_archive_fingerprint,
+                fixed_binary: fixed_binary_fingerprint,
+                terminal_observation_receipt: terminal_receipt_fingerprint,
+                terminal_observation_evidence: terminal_evidence_fingerprint,
+                completion: completion_fingerprint,
+                completion_anchor: completion_anchor_fingerprint,
+                checks: vec![
+                    "v3_plan_and_manifest_binding",
+                    "selected_route_identity_and_invariants",
+                    "source_archive_git_tree_commit_and_cargo_lock",
+                    "build_input_inventory_and_streamed_archive",
+                    "anchored_genesis_build_receipt_and_binary_binding",
+                    "terminal_segment_structural_envelope_and_footer_summary_binding",
+                    "inspected_genesis_and_terminal_segment_lifecycle_payload_shape_and_canonicality",
+                    "offline_ed25519_anchor_signatures_and_chronology",
+                ],
+                artifact_integrity_status: "valid",
+                campaign_qualification_status: "not_evaluated",
+                production_threshold_activation: false,
+                limitations: vec![
+                    "one_selected_route_artifact_only",
+                    "intermediate_segment_chain_and_lifecycle_payload_semantics_not_analyzed",
+                    "first_quiet_window_evidence_content_and_build_order_not_analyzed",
+                    "retained_build_tree_offline_probe_not_reexecuted",
+                    "operator_selected_anchor_key_trust_provenance_not_established",
+                    "cross_file_consistency_requires_quiescent_or_snapshotted_campaign",
+                    "output_parent_ancestry_requires_quiescent_namespace",
+                    "failed_post_publication_verification_may_leave_a_nonactivating_create_new_report",
+                    "report_publication_crash_durability_depends_on_operating_system_and_filesystem",
+                    "no_performance_or_threshold_claim",
+                ],
+            };
+            write_analysis_report(request.output, Some(campaign.identity), &report)?;
+            println!(
+                "Validated the bounded offline artifact-integrity slice; campaign qualification remains not evaluated."
+            );
+        }
+        AnalysisScope::IndexedTimingArtifacts => {
+            let timing = evidence_validation::validate_indexed_timing_artifacts(
+                &campaign,
+                &manifest,
+                &plan,
+                &completion,
+                &hardware,
+                &mut read_budget,
+            )?;
+            let timing_estimate_count = u32::try_from(timing.medians_nanoseconds.len())
+                .context("analysis rejected: timing estimate count")?;
+            let cell_effects =
+                statistics::analyze_cells(&timing.medians_nanoseconds, &manifest, &plan)
+                    .context("analysis rejected: indexed statistics")?;
+            anyhow::ensure!(
+                timing_estimate_count == schedule::TOTAL_PROCESS_COUNT
+                    && timing.criterion_artifact_count == schedule::TOTAL_PROCESS_COUNT
+                    && timing.route_artifact_count == schedule::TOTAL_PROCESS_COUNT
+                    && cell_effects.len() == schedule::PAIRED_CELL_COUNT,
+                "analysis rejected: indexed result cardinality"
+            );
+            let report = SdJwtIssuanceIndexedAnalysisReport {
+                schema: "marty.performance/sd-jwt-issuance-indexed-analysis/v1".to_owned(),
+                analysis_scope:
+                    "all_indexed_route_and_criterion_estimate_artifacts_v1".to_owned(),
+                campaign_id: build_receipt.campaign_id,
+                manifest: manifest_fingerprint,
+                plan: plan_fingerprint,
+                target_triple: build_receipt.target_triple,
+                hardware_profile: hardware_fingerprint,
+                source_archive: source_archive_fingerprint,
+                cargo_lock: cargo_lock_fingerprint,
+                build_receipt: build_receipt_fingerprint,
+                build_input_inventory: inventory_fingerprint,
+                build_input_archive: build_archive_fingerprint,
+                fixed_binary: fixed_binary_fingerprint,
+                terminal_observation_receipt: terminal_receipt_fingerprint,
+                terminal_observation_evidence: terminal_evidence_fingerprint,
+                completion: completion_fingerprint,
+                completion_anchor: completion_anchor_fingerprint,
+                criterion_artifact_index: timing.criterion_index_fingerprint,
+                criterion_artifact_count: timing.criterion_artifact_count,
+                criterion_artifact_bytes: timing.criterion_artifact_bytes,
+                route_artifact_index: timing.route_index_fingerprint,
+                route_artifact_count: timing.route_artifact_count,
+                route_artifact_bytes: timing.route_artifact_bytes,
+                timing_estimate_count,
+                primary_statistic:
+                    "criterion_0_5_1_median_point_estimate_nanoseconds".to_owned(),
+                effect_math_implementation: statistics::EFFECT_MATH_IMPLEMENTATION.to_owned(),
+                bootstrap_replicates: plan.bootstrap.replicates,
+                bootstrap_seed: plan.bootstrap.seed,
+                bootstrap_confidence_level: plan.bootstrap.confidence_level,
+                cell_effects,
+                individual_operation_latency_p50: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+                individual_operation_latency_p95: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+                individual_operation_latency_p99: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+                throughput: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+                allocation_evidence: SdJwtIssuanceAnalysisStatus::NotMeasured,
+                simd_lane_utilization: SdJwtIssuanceAnalysisStatus::NotMeasured,
+                artifact_integrity_status: "valid".to_owned(),
+                campaign_qualification_status: "not_evaluated".to_owned(),
+                production_threshold_activation: false,
+                production_activation_separate: true,
+                qualified_issuance_thresholds: None,
+                limitations: vec![
+                    "criterion_medians_are_estimator_outputs_not_individual_operation_percentiles"
+                        .to_owned(),
+                    "intermediate_segment_chain_and_lifecycle_payload_semantics_not_analyzed"
+                        .to_owned(),
+                    "first_quiet_window_evidence_content_and_build_order_not_analyzed".to_owned(),
+                    "retained_build_tree_offline_probe_not_reexecuted".to_owned(),
+                    "complete_criterion_artifact_homes_not_traversed".to_owned(),
+                    "tail_latency_and_throughput_not_evaluated_allocation_and_lane_utilization_not_measured"
+                        .to_owned(),
+                    "operator_selected_anchor_key_trust_provenance_not_established".to_owned(),
+                    "cross_file_consistency_requires_quiescent_or_snapshotted_campaign".to_owned(),
+                    "output_parent_ancestry_requires_quiescent_namespace".to_owned(),
+                    "failed_post_publication_verification_may_leave_a_nonactivating_create_new_report"
+                        .to_owned(),
+                    "report_publication_crash_durability_depends_on_operating_system_and_filesystem"
+                        .to_owned(),
+                    "target_campaigns_threshold_discovery_and_activation_remain_separate"
+                        .to_owned(),
+                ],
+            };
+            write_analysis_report(request.output, Some(campaign.identity), &report)?;
+            println!(
+                "Analyzed all indexed Criterion median estimates and route artifacts; campaign qualification and production activation remain not evaluated."
+            );
+        }
+    }
     Ok(())
 }
 
@@ -6125,7 +6235,9 @@ mod tests {
 
     use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
     use hmac::{Hmac, Mac};
-    use marty_perf_schema::SdJwtIssuanceThresholds;
+    use marty_perf_schema::{
+        SdJwtIssuanceCellEffects, SdJwtIssuanceEffectInterval, SdJwtIssuanceThresholds,
+    };
     use serde::{Deserialize, Serialize};
     use sha1::Sha1;
 
@@ -13182,9 +13294,13 @@ mod tests {
 
         let accepted_output = fixture.output("accepted.json");
         analyze(&fixture.request(&accepted_output)).expect("valid campaign analysis");
+        let report_bytes = fs::read(accepted_output).expect("analysis report");
+        assert_eq!(
+            hex::encode_upper(Sha256::digest(&report_bytes)),
+            "6FFF01655A1103FAD2E54F45192E0AFC50D75D5BE26B8247E4ED2C00A3860C99"
+        );
         let report: serde_json::Value =
-            serde_json::from_slice(&fs::read(accepted_output).expect("analysis report"))
-                .expect("analysis JSON");
+            serde_json::from_slice(&report_bytes).expect("analysis JSON");
         assert_eq!(report["artifact_integrity_status"], "valid");
         assert_eq!(report["campaign_qualification_status"], "not_evaluated");
         assert_eq!(report["production_threshold_activation"], false);
@@ -13276,6 +13392,10 @@ mod tests {
         write_analysis_report(&output, None, &report).expect("write analysis report");
         let first = fs::read(&output).expect("analysis bytes");
         assert_eq!(canonical_pretty_bytes(&report), first);
+        assert_eq!(
+            hex::encode_upper(Sha256::digest(&first)),
+            "AC1A23526C4C6D5FAF3EA84C1AFD5D05C4058A6C7F7C9EF9EA3FD0B5D805B9BB"
+        );
         let encoded = String::from_utf8(first.clone()).expect("analysis UTF-8");
         assert!(encoded.contains("\"campaign_qualification_status\": \"not_evaluated\""));
         assert!(encoded.contains("\"production_threshold_activation\": false"));
@@ -13291,6 +13411,94 @@ mod tests {
             write_analysis_report(&contaminated_output, Some(campaign.identity), &report,).is_err()
         );
         assert!(!contaminated_output.exists());
+    }
+
+    #[test]
+    fn indexed_analysis_schema_is_deterministic_explicit_and_nonactivating() {
+        let interval = SdJwtIssuanceEffectInterval {
+            interval_method: "simultaneous_common_max_deviation_95_percent".to_owned(),
+            point_estimate_log_ratio: 0.0,
+            lower_log_ratio: -0.1,
+            upper_log_ratio: 0.1,
+            point_estimate_relative_percent: 0.0,
+            lower_relative_percent: -9.516_258_196_404_05,
+            upper_relative_percent: 10.517_091_807_564_771,
+        };
+        let report = SdJwtIssuanceIndexedAnalysisReport {
+            schema: "marty.performance/sd-jwt-issuance-indexed-analysis/v1".to_owned(),
+            analysis_scope: "all_indexed_route_and_criterion_estimate_artifacts_v1".to_owned(),
+            campaign_id: "018f4f9a-3f5b-4ae8-8a37-11c9fc12d001".to_owned(),
+            manifest: golden_fingerprint(1),
+            plan: golden_fingerprint(2),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            hardware_profile: golden_fingerprint(3),
+            source_archive: golden_fingerprint(4),
+            cargo_lock: golden_fingerprint(5),
+            build_receipt: golden_fingerprint(6),
+            build_input_inventory: golden_fingerprint(7),
+            build_input_archive: golden_fingerprint(8),
+            fixed_binary: golden_fingerprint(9),
+            terminal_observation_receipt: golden_fingerprint(10),
+            terminal_observation_evidence: golden_fingerprint(11),
+            completion: golden_fingerprint(12),
+            completion_anchor: golden_fingerprint(13),
+            criterion_artifact_index: golden_fingerprint(14),
+            criterion_artifact_count: 10_560,
+            criterion_artifact_bytes: 42,
+            route_artifact_index: golden_fingerprint(15),
+            route_artifact_count: 10_560,
+            route_artifact_bytes: 84,
+            timing_estimate_count: 10_560,
+            primary_statistic: "criterion_0_5_1_median_point_estimate_nanoseconds".to_owned(),
+            effect_math_implementation: statistics::EFFECT_MATH_IMPLEMENTATION.to_owned(),
+            bootstrap_replicates: 100_000,
+            bootstrap_seed: 2_453_812_215,
+            bootstrap_confidence_level: 0.95,
+            cell_effects: vec![SdJwtIssuanceCellEffects {
+                cell_ordinal: 0,
+                fixture_id: "synthetic".to_owned(),
+                stage: "executor_assembly".to_owned(),
+                serial_benchmark_id: "sd_jwt_issuance/synthetic/serial".to_owned(),
+                adaptive_benchmark_id: "sd_jwt_issuance/synthetic/adaptive".to_owned(),
+                d: interval.clone(),
+                s: interval.clone(),
+                p: interval.clone(),
+                o: SdJwtIssuanceEffectInterval {
+                    interval_method: "marginal_type_7_95_percent".to_owned(),
+                    ..interval
+                },
+            }],
+            individual_operation_latency_p50: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+            individual_operation_latency_p95: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+            individual_operation_latency_p99: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+            throughput: SdJwtIssuanceAnalysisStatus::NotEvaluated,
+            allocation_evidence: SdJwtIssuanceAnalysisStatus::NotMeasured,
+            simd_lane_utilization: SdJwtIssuanceAnalysisStatus::NotMeasured,
+            artifact_integrity_status: "valid".to_owned(),
+            campaign_qualification_status: "not_evaluated".to_owned(),
+            production_threshold_activation: false,
+            production_activation_separate: true,
+            qualified_issuance_thresholds: None,
+            limitations: vec!["nonactivating_test_fixture".to_owned()],
+        };
+        let bytes = canonical_pretty_bytes(&report);
+        let parsed: SdJwtIssuanceIndexedAnalysisReport =
+            serde_json::from_slice(&bytes).expect("indexed analysis round trip");
+        assert_eq!(parsed, report);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["individual_operation_latency_p50"], "not_evaluated");
+        assert_eq!(value["individual_operation_latency_p99"], "not_evaluated");
+        assert_eq!(value["allocation_evidence"], "not_measured");
+        assert_eq!(value["simd_lane_utilization"], "not_measured");
+        assert_eq!(
+            value["qualified_issuance_thresholds"],
+            serde_json::Value::Null
+        );
+        assert_eq!(value["production_threshold_activation"], false);
+        assert_eq!(
+            hex::encode_upper(Sha256::digest(&bytes)),
+            "94349D1E3236DEAA22DF57D6A8D3D40C3862A5E70700BC3A40542FA4C365E668"
+        );
     }
 
     #[test]

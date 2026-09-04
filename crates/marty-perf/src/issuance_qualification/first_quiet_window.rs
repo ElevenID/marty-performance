@@ -145,6 +145,57 @@ struct ValidityThresholdsWire {
     require_all_observations: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct HostIdentityWire {
+    schema: String,
+    campaign_id: String,
+    identity_scheme: String,
+    host_identity_pseudonym: String,
+    boot_identity_pseudonym: String,
+}
+
+/// Narrow, validated threshold capability shared by both quiet-window validators.
+pub(super) struct ValidatedThresholdPolicy {
+    fingerprint: ArtifactFingerprint,
+    policy: HostStabilityPolicy,
+}
+
+/// One host observation evaluated by the shared validity predicate.
+pub(super) struct HostObservation<'a> {
+    pub(super) total_cpu_percent: f64,
+    pub(super) monitor_cpu_percent: f64,
+    pub(super) benchmark_cpu_percent: f64,
+    pub(super) unrelated_cpu_percent: f64,
+    pub(super) available_memory_bytes: u64,
+    pub(super) cpu_frequency_hz: u64,
+    pub(super) maximum_temperature_millidegrees_celsius: i64,
+    pub(super) throttle_flags: &'a [String],
+}
+
+/// Validated timing-window interval and privacy-preserving target identity.
+pub(super) struct ValidatedTestWindow {
+    fingerprint: ArtifactFingerprint,
+    starts_at_utc_nanoseconds: i128,
+    expires_at_utc_nanoseconds: i128,
+    target_role: String,
+    target_identity_pseudonym: String,
+    change_reference_pseudonym: String,
+}
+
+/// Validated host/boot pseudonyms without exposing the wire representation.
+pub(super) struct ValidatedHostIdentity {
+    fingerprint: ArtifactFingerprint,
+    host_identity_pseudonym: String,
+    boot_identity_pseudonym: String,
+}
+
+/// Validated content-addressed unrelated-process set.
+pub(super) struct ValidatedProcessSet {
+    fingerprint: ArtifactFingerprint,
+    process_identity_pseudonyms: Vec<String>,
+}
+
 pub(super) struct PersistedFirstQuietWindowPreimages {
     attestation_bytes: Vec<u8>,
     attestation_fingerprint: ArtifactFingerprint,
@@ -383,17 +434,17 @@ struct FirstQuietWindowAttestation {
 }
 
 struct HostStabilityPolicy {
-    pub(super) total_memory_bytes: u64,
-    pub(super) maximum_total_cpu_percent: f64,
-    pub(super) maximum_monitor_cpu_percent: f64,
-    pub(super) maximum_unrelated_cpu_percent: f64,
-    pub(super) minimum_available_memory_bytes: u64,
-    pub(super) minimum_cpu_frequency_hz: u64,
-    pub(super) maximum_temperature_millidegrees_celsius: i64,
-    pub(super) forbidden_throttle_flags: Vec<String>,
-    pub(super) maximum_unrelated_process_count: u32,
-    pub(super) unrelated_process_set_policy: String,
-    pub(super) require_all_observations: bool,
+    total_memory_bytes: u64,
+    maximum_total_cpu_percent: f64,
+    maximum_monitor_cpu_percent: f64,
+    maximum_unrelated_cpu_percent: f64,
+    minimum_available_memory_bytes: u64,
+    minimum_cpu_frequency_hz: u64,
+    maximum_temperature_millidegrees_celsius: i64,
+    forbidden_throttle_flags: Vec<String>,
+    maximum_unrelated_process_count: u32,
+    unrelated_process_set_policy: String,
+    require_all_observations: bool,
 }
 
 #[allow(
@@ -480,20 +531,16 @@ fn validate_first_quiet_window_semantics(
         "first quiet window: attestation canonical bytes",
     )?;
     anyhow::ensure!(
-        attestation.schema == "marty.performance/sd-jwt-issuance-test-window/v1"
-            && attestation.campaign_id == bindings.campaign_id
-            && attestation.target_role == bindings.target_role
-            && matches!(
-                attestation.target_role.as_str(),
-                "isolated_production_gateway" | "dedicated_performance_gateway"
-            )
-            && attestation.target_identity_pseudonym == bindings.target_identity_pseudonym
-            && attestation.change_reference_pseudonym == bindings.change_reference_pseudonym
-            && valid_uppercase_hex_256(&attestation.target_identity_pseudonym)
-            && valid_uppercase_hex_256(&attestation.change_reference_pseudonym)
-            && attestation.production_traffic_drained
-            && attestation.public_ingress_disabled
-            && attestation.synthetic_data_only,
+        valid_test_window_conditions(
+            &attestation,
+            &bindings.campaign_id,
+            Some((
+                &bindings.target_role,
+                &bindings.target_identity_pseudonym,
+                &bindings.change_reference_pseudonym,
+            )),
+            false,
+        ),
         "first quiet window: attestation conditions"
     );
     let start_utc = utc_nanos(&wire.started_at_utc_rfc3339_nanoseconds)?;
@@ -546,21 +593,12 @@ fn validate_first_quiet_window_semantics(
             && thresholds.campaign_id == bindings.campaign_id,
         "first quiet window: thresholds binding"
     );
-    let policy = HostStabilityPolicy {
-        total_memory_bytes: hardware.total_memory_bytes,
-        maximum_total_cpu_percent: thresholds.maximum_total_cpu_percent,
-        maximum_monitor_cpu_percent: thresholds.maximum_monitor_cpu_percent,
-        maximum_unrelated_cpu_percent: thresholds.maximum_unrelated_cpu_percent,
-        minimum_available_memory_bytes: thresholds.minimum_available_memory_bytes,
-        minimum_cpu_frequency_hz: thresholds.minimum_cpu_frequency_hz,
-        maximum_temperature_millidegrees_celsius: thresholds
-            .maximum_temperature_millidegrees_celsius,
-        forbidden_throttle_flags: thresholds.forbidden_throttle_flags,
-        maximum_unrelated_process_count: thresholds.maximum_unrelated_process_count,
-        unrelated_process_set_policy: thresholds.unrelated_process_set_policy,
-        require_all_observations: thresholds.require_all_observations,
-    };
-    validate_policy(&policy).map_err(|_| anyhow::anyhow!("first quiet window: policy"))?;
+    let policy = validated_threshold_policy_from_wire(
+        thresholds,
+        hardware.total_memory_bytes,
+        &preimages.thresholds_fingerprint,
+    )
+    .map_err(|_| anyhow::anyhow!("first quiet window: policy"))?;
     for sample in &wire.samples {
         let sample_utc = utc_nanos(&sample.utc_rfc3339_nanoseconds)
             .map_err(|_| anyhow::anyhow!("first quiet window: sample"))?;
@@ -639,20 +677,12 @@ fn validate_first_quiet_window_semantics(
         "first quiet window: process set canonical bytes",
     )?;
     anyhow::ensure!(
-        set.schema == "marty.performance/sd-jwt-issuance-unrelated-process-set/v1"
-            && set.campaign_id == bindings.campaign_id
-            && set.boot_identity_pseudonym == bindings.boot_identity_pseudonym
-            && set.identity_scheme == "hmac_sha256_campaign_ephemeral_process_set_v1"
-            && usize::try_from(set.entry_count) == Ok(set.opaque_process_instances.len())
-            && set.entry_count <= policy.maximum_unrelated_process_count
-            && set
-                .opaque_process_instances
-                .windows(2)
-                .all(|pair| pair[0].process_instance_pseudonym < pair[1].process_instance_pseudonym)
-            && set
-                .opaque_process_instances
-                .iter()
-                .all(|value| valid_uppercase_hex_256(&value.process_instance_pseudonym)),
+        valid_process_set_semantics(
+            &set,
+            &bindings.campaign_id,
+            &bindings.boot_identity_pseudonym,
+            policy.maximum_unrelated_process_count(),
+        ),
         "first quiet window: process set policy"
     );
     for sample in &wire.samples {
@@ -740,7 +770,347 @@ fn fingerprint_bytes(bytes: &[u8]) -> Result<ArtifactFingerprint> {
     })
 }
 
-fn utc_nanos(value: &str) -> Result<i128> {
+fn validated_threshold_policy_from_wire(
+    wire: ValidityThresholdsWire,
+    total_memory_bytes: u64,
+    fingerprint: &ArtifactFingerprint,
+) -> Result<ValidatedThresholdPolicy> {
+    let policy = HostStabilityPolicy {
+        total_memory_bytes,
+        maximum_total_cpu_percent: wire.maximum_total_cpu_percent,
+        maximum_monitor_cpu_percent: wire.maximum_monitor_cpu_percent,
+        maximum_unrelated_cpu_percent: wire.maximum_unrelated_cpu_percent,
+        minimum_available_memory_bytes: wire.minimum_available_memory_bytes,
+        minimum_cpu_frequency_hz: wire.minimum_cpu_frequency_hz,
+        maximum_temperature_millidegrees_celsius: wire.maximum_temperature_millidegrees_celsius,
+        forbidden_throttle_flags: wire.forbidden_throttle_flags,
+        maximum_unrelated_process_count: wire.maximum_unrelated_process_count,
+        unrelated_process_set_policy: wire.unrelated_process_set_policy,
+        require_all_observations: wire.require_all_observations,
+    };
+    validate_policy(&policy)?;
+    Ok(ValidatedThresholdPolicy {
+        fingerprint: fingerprint.clone(),
+        policy,
+    })
+}
+
+fn valid_test_window_conditions(
+    wire: &FirstQuietWindowAttestationWire,
+    campaign_id: &str,
+    expected_identity: Option<(&str, &str, &str)>,
+    require_distinct_identity_aliases: bool,
+) -> bool {
+    wire.schema == "marty.performance/sd-jwt-issuance-test-window/v1"
+        && wire.campaign_id == campaign_id
+        && matches!(
+            wire.target_role.as_str(),
+            "isolated_production_gateway" | "dedicated_performance_gateway"
+        )
+        && expected_identity.is_none_or(|(role, target, change)| {
+            wire.target_role == role
+                && wire.target_identity_pseudonym == target
+                && wire.change_reference_pseudonym == change
+        })
+        && valid_uppercase_hex_256(&wire.target_identity_pseudonym)
+        && valid_uppercase_hex_256(&wire.change_reference_pseudonym)
+        && (!require_distinct_identity_aliases
+            || wire.target_identity_pseudonym != wire.change_reference_pseudonym)
+        && wire.production_traffic_drained
+        && wire.public_ingress_disabled
+        && wire.synthetic_data_only
+}
+
+fn valid_process_set_semantics(
+    wire: &UnrelatedProcessSetWire,
+    campaign_id: &str,
+    boot_identity_pseudonym: &str,
+    maximum_unrelated_process_count: u32,
+) -> bool {
+    wire.schema == "marty.performance/sd-jwt-issuance-unrelated-process-set/v1"
+        && wire.campaign_id == campaign_id
+        && wire.boot_identity_pseudonym == boot_identity_pseudonym
+        && wire.identity_scheme == "hmac_sha256_campaign_ephemeral_process_set_v1"
+        && usize::try_from(wire.entry_count) == Ok(wire.opaque_process_instances.len())
+        && wire.entry_count <= maximum_unrelated_process_count
+        && wire
+            .opaque_process_instances
+            .windows(2)
+            .all(|pair| pair[0].process_instance_pseudonym < pair[1].process_instance_pseudonym)
+        && wire
+            .opaque_process_instances
+            .iter()
+            .all(|entry| valid_uppercase_hex_256(&entry.process_instance_pseudonym))
+}
+
+pub(super) fn validate_threshold_policy_bytes(
+    bytes: &[u8],
+    expected_fingerprint: &ArtifactFingerprint,
+    campaign_id: &str,
+    total_memory_bytes: u64,
+) -> Result<ValidatedThresholdPolicy> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTIFACT_BYTES && fingerprint_bytes(bytes)?.eq(expected_fingerprint),
+        "validity thresholds: actual bytes"
+    );
+    let wire: ValidityThresholdsWire = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("validity thresholds: schema"))?;
+    require_canonical(bytes, &wire, "validity thresholds: canonical bytes")?;
+    anyhow::ensure!(
+        wire.schema == "marty.performance/sd-jwt-issuance-validity-thresholds/v1"
+            && wire.campaign_id == campaign_id,
+        "validity thresholds: binding"
+    );
+    validated_threshold_policy_from_wire(wire, total_memory_bytes, expected_fingerprint)
+        .map_err(|_| anyhow::anyhow!("validity thresholds: policy"))
+}
+
+impl ValidatedThresholdPolicy {
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    fn maximum_unrelated_process_count(&self) -> u32 {
+        self.policy.maximum_unrelated_process_count
+    }
+
+    fn valid_cpu_observation(observation: &HostObservation<'_>) -> bool {
+        let cpu = [
+            observation.total_cpu_percent,
+            observation.monitor_cpu_percent,
+            observation.benchmark_cpu_percent,
+            observation.unrelated_cpu_percent,
+        ];
+        let component_total = observation.monitor_cpu_percent
+            + observation.benchmark_cpu_percent
+            + observation.unrelated_cpu_percent;
+        cpu.iter()
+            .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            && observation.monitor_cpu_percent <= observation.total_cpu_percent
+            && observation.benchmark_cpu_percent <= observation.total_cpu_percent
+            && observation.unrelated_cpu_percent <= observation.total_cpu_percent
+            && component_total.is_finite()
+            && component_total <= observation.total_cpu_percent
+    }
+
+    fn observation_satisfies_policy(&self, observation: &HostObservation<'_>) -> bool {
+        observation.total_cpu_percent <= self.policy.maximum_total_cpu_percent
+            && observation.monitor_cpu_percent <= self.policy.maximum_monitor_cpu_percent
+            && observation.unrelated_cpu_percent <= self.policy.maximum_unrelated_cpu_percent
+            && observation.available_memory_bytes <= self.policy.total_memory_bytes
+            && (self.policy.minimum_available_memory_bytes == 0
+                || observation.available_memory_bytes >= self.policy.minimum_available_memory_bytes)
+            && (1..=10_000_000_000).contains(&observation.cpu_frequency_hz)
+            && (self.policy.minimum_cpu_frequency_hz == 0
+                || observation.cpu_frequency_hz >= self.policy.minimum_cpu_frequency_hz)
+            && (-100_000..=200_000).contains(&observation.maximum_temperature_millidegrees_celsius)
+            && observation.maximum_temperature_millidegrees_celsius
+                <= self.policy.maximum_temperature_millidegrees_celsius
+    }
+
+    fn valid_throttle_flags(observation: &HostObservation<'_>) -> bool {
+        sorted_unique_known_flags(observation.throttle_flags)
+    }
+
+    fn throttle_flags_are_allowed(&self, observation: &HostObservation<'_>) -> bool {
+        !observation.throttle_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "thermal" | "power_limit")
+                || self
+                    .policy
+                    .forbidden_throttle_flags
+                    .binary_search(flag)
+                    .is_ok()
+        })
+    }
+
+    pub(super) fn validate_observation(&self, observation: &HostObservation<'_>) -> Result<()> {
+        anyhow::ensure!(
+            Self::valid_cpu_observation(observation),
+            "host observation: CPU"
+        );
+        anyhow::ensure!(
+            self.observation_satisfies_policy(observation),
+            "host observation: policy"
+        );
+        anyhow::ensure!(
+            Self::valid_throttle_flags(observation) && self.throttle_flags_are_allowed(observation),
+            "host observation: throttle"
+        );
+        Ok(())
+    }
+}
+
+pub(super) fn validate_process_set_bytes(
+    bytes: &[u8],
+    expected_fingerprint: &ArtifactFingerprint,
+    campaign_id: &str,
+    boot_identity_pseudonym: &str,
+    thresholds: &ValidatedThresholdPolicy,
+) -> Result<ValidatedProcessSet> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTIFACT_BYTES && fingerprint_bytes(bytes)?.eq(expected_fingerprint),
+        "unrelated process set: actual bytes"
+    );
+    let wire: UnrelatedProcessSetWire = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("unrelated process set: schema"))?;
+    require_canonical(bytes, &wire, "unrelated process set: canonical bytes")?;
+    anyhow::ensure!(
+        valid_process_set_semantics(
+            &wire,
+            campaign_id,
+            boot_identity_pseudonym,
+            thresholds.maximum_unrelated_process_count(),
+        ),
+        "unrelated process set: semantics"
+    );
+    Ok(ValidatedProcessSet {
+        fingerprint: expected_fingerprint.clone(),
+        process_identity_pseudonyms: wire
+            .opaque_process_instances
+            .into_iter()
+            .map(|entry| entry.process_instance_pseudonym)
+            .collect(),
+    })
+}
+
+impl ValidatedProcessSet {
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    pub(super) fn process_identity_pseudonyms(&self) -> &[String] {
+        &self.process_identity_pseudonyms
+    }
+}
+
+fn validate_test_window_common(
+    bytes: &[u8],
+    expected_fingerprint: &ArtifactFingerprint,
+    campaign_id: &str,
+) -> Result<ValidatedTestWindow> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTIFACT_BYTES && fingerprint_bytes(bytes)?.eq(expected_fingerprint),
+        "test window: actual bytes"
+    );
+    let wire: FirstQuietWindowAttestationWire =
+        serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("test window: schema"))?;
+    require_canonical(bytes, &wire, "test window: canonical bytes")?;
+    let start = utc_nanos(&wire.starts_at_rfc3339_nanoseconds)
+        .map_err(|_| anyhow::anyhow!("test window: UTC"))?;
+    let expiry = utc_nanos(&wire.expires_at_rfc3339_nanoseconds)
+        .map_err(|_| anyhow::anyhow!("test window: UTC"))?;
+    anyhow::ensure!(
+        valid_test_window_conditions(&wire, campaign_id, None, true)
+            && (1..=i128::from(MAXIMUM_ATTESTATION_DURATION_NS)).contains(&(expiry - start)),
+        "test window: semantics"
+    );
+    Ok(ValidatedTestWindow {
+        fingerprint: expected_fingerprint.clone(),
+        starts_at_utc_nanoseconds: start,
+        expires_at_utc_nanoseconds: expiry,
+        target_role: wire.target_role,
+        target_identity_pseudonym: wire.target_identity_pseudonym,
+        change_reference_pseudonym: wire.change_reference_pseudonym,
+    })
+}
+
+pub(super) fn validate_initial_test_window_bytes(
+    bytes: &[u8],
+    expected_fingerprint: &ArtifactFingerprint,
+    campaign_id: &str,
+) -> Result<ValidatedTestWindow> {
+    validate_test_window_common(bytes, expected_fingerprint, campaign_id)
+}
+
+pub(super) fn validate_test_window_bytes(
+    bytes: &[u8],
+    expected_fingerprint: &ArtifactFingerprint,
+    campaign_id: &str,
+    expected_target_role: &str,
+    expected_target_identity_pseudonym: &str,
+    expected_change_reference_pseudonym: &str,
+) -> Result<ValidatedTestWindow> {
+    let validated = validate_test_window_common(bytes, expected_fingerprint, campaign_id)?;
+    anyhow::ensure!(
+        validated.target_role == expected_target_role
+            && validated.target_identity_pseudonym == expected_target_identity_pseudonym
+            && validated.change_reference_pseudonym == expected_change_reference_pseudonym,
+        "test window: identity binding"
+    );
+    Ok(validated)
+}
+
+impl ValidatedTestWindow {
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    pub(super) fn starts_at_utc_nanoseconds(&self) -> i128 {
+        self.starts_at_utc_nanoseconds
+    }
+
+    pub(super) fn expires_at_utc_nanoseconds(&self) -> i128 {
+        self.expires_at_utc_nanoseconds
+    }
+
+    pub(super) fn target_role(&self) -> &str {
+        &self.target_role
+    }
+
+    pub(super) fn target_identity_pseudonym(&self) -> &str {
+        &self.target_identity_pseudonym
+    }
+
+    pub(super) fn change_reference_pseudonym(&self) -> &str {
+        &self.change_reference_pseudonym
+    }
+}
+
+pub(super) fn validate_host_identity_bytes(
+    bytes: &[u8],
+    expected_fingerprint: &ArtifactFingerprint,
+    campaign_id: &str,
+    boot_identity_pseudonym: &str,
+) -> Result<ValidatedHostIdentity> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTIFACT_BYTES && fingerprint_bytes(bytes)?.eq(expected_fingerprint),
+        "host identity: actual bytes"
+    );
+    let wire: HostIdentityWire =
+        serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("host identity: schema"))?;
+    require_canonical(bytes, &wire, "host identity: canonical bytes")?;
+    anyhow::ensure!(
+        wire.schema == "marty.performance/sd-jwt-issuance-host-identity/v1"
+            && wire.campaign_id == campaign_id
+            && wire.identity_scheme == "campaign_random_256_v1"
+            && valid_uppercase_hex_256(&wire.host_identity_pseudonym)
+            && valid_uppercase_hex_256(&wire.boot_identity_pseudonym)
+            && wire.host_identity_pseudonym != wire.boot_identity_pseudonym
+            && wire.boot_identity_pseudonym == boot_identity_pseudonym,
+        "host identity: semantics"
+    );
+    Ok(ValidatedHostIdentity {
+        fingerprint: expected_fingerprint.clone(),
+        host_identity_pseudonym: wire.host_identity_pseudonym,
+        boot_identity_pseudonym: wire.boot_identity_pseudonym,
+    })
+}
+
+impl ValidatedHostIdentity {
+    pub(super) fn fingerprint(&self) -> &ArtifactFingerprint {
+        &self.fingerprint
+    }
+
+    pub(super) fn boot_identity_pseudonym(&self) -> &str {
+        &self.boot_identity_pseudonym
+    }
+
+    pub(super) fn host_identity_pseudonym(&self) -> &str {
+        &self.host_identity_pseudonym
+    }
+}
+
+pub(super) fn utc_nanos(value: &str) -> Result<i128> {
     anyhow::ensure!(
         super::valid_utc_rfc3339_nanoseconds(value),
         "first quiet window: UTC grammar"
@@ -757,7 +1127,7 @@ impl FirstQuietWindowObservation {
     pub(super) fn validate(
         &self,
         attestation: &FirstQuietWindowAttestation,
-        policy: &HostStabilityPolicy,
+        policy: &ValidatedThresholdPolicy,
     ) -> Result<()> {
         anyhow::ensure!(self.validity_status == "valid", "quiet window is not valid");
         anyhow::ensure!(
@@ -807,7 +1177,7 @@ impl FirstQuietWindowObservation {
             !self.samples.is_empty(),
             "quiet window sample count is invalid"
         );
-        validate_policy(policy)?;
+        validate_policy(&policy.policy)?;
         let mut previous = None;
         for (index, sample) in self.samples.iter().enumerate() {
             let ordinal = u64::try_from(index).context("sample ordinal overflow")?;
@@ -889,35 +1259,24 @@ fn validate_policy(policy: &HostStabilityPolicy) -> Result<()> {
 fn validate_sample(
     sample: &FirstQuietWindowSample,
     boot_identity: &str,
-    policy: &HostStabilityPolicy,
+    policy: &ValidatedThresholdPolicy,
 ) -> Result<()> {
-    let cpu = [
-        sample.total_cpu_percent,
-        sample.monitor_cpu_percent,
-        sample.unrelated_cpu_percent,
-    ];
+    let observation = HostObservation {
+        total_cpu_percent: sample.total_cpu_percent,
+        monitor_cpu_percent: sample.monitor_cpu_percent,
+        benchmark_cpu_percent: 0.0,
+        unrelated_cpu_percent: sample.unrelated_cpu_percent,
+        available_memory_bytes: sample.available_memory_bytes,
+        cpu_frequency_hz: sample.cpu_frequency_hz,
+        maximum_temperature_millidegrees_celsius: sample.maximum_temperature_millidegrees_celsius,
+        throttle_flags: &sample.throttle_flags,
+    };
     anyhow::ensure!(
-        cpu.iter()
-            .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            && sample.monitor_cpu_percent <= sample.total_cpu_percent
-            && sample.unrelated_cpu_percent <= sample.total_cpu_percent
-            && sample.monitor_cpu_percent + sample.unrelated_cpu_percent
-                <= sample.total_cpu_percent,
+        ValidatedThresholdPolicy::valid_cpu_observation(&observation),
         "invalid quiet-window CPU observation"
     );
     anyhow::ensure!(
-        sample.total_cpu_percent <= policy.maximum_total_cpu_percent
-            && sample.monitor_cpu_percent <= policy.maximum_monitor_cpu_percent
-            && sample.unrelated_cpu_percent <= policy.maximum_unrelated_cpu_percent
-            && sample.available_memory_bytes <= policy.total_memory_bytes
-            && (policy.minimum_available_memory_bytes == 0
-                || sample.available_memory_bytes >= policy.minimum_available_memory_bytes)
-            && (1..=10_000_000_000).contains(&sample.cpu_frequency_hz)
-            && (policy.minimum_cpu_frequency_hz == 0
-                || sample.cpu_frequency_hz >= policy.minimum_cpu_frequency_hz)
-            && (-100_000..=200_000).contains(&sample.maximum_temperature_millidegrees_celsius)
-            && sample.maximum_temperature_millidegrees_celsius
-                <= policy.maximum_temperature_millidegrees_celsius,
+        policy.observation_satisfies_policy(&observation),
         "quiet-window observation violates host-stability policy"
     );
     anyhow::ensure!(
@@ -925,14 +1284,11 @@ fn validate_sample(
         "boot identity changed during quiet window"
     );
     anyhow::ensure!(
-        sorted_unique_known_flags(&sample.throttle_flags),
+        ValidatedThresholdPolicy::valid_throttle_flags(&observation),
         "invalid throttle flags"
     );
     anyhow::ensure!(
-        !sample.throttle_flags.iter().any(|flag| {
-            matches!(flag.as_str(), "thermal" | "power_limit")
-                || policy.forbidden_throttle_flags.binary_search(flag).is_ok()
-        }),
+        policy.throttle_flags_are_allowed(&observation),
         "forbidden throttle flag observed"
     );
     anyhow::ensure!(
@@ -970,6 +1326,13 @@ mod tests {
         let mut bytes = serde_json::to_vec_pretty(value).unwrap();
         bytes.push(b'\n');
         bytes
+    }
+
+    fn error<T>(result: Result<T>) -> String {
+        result
+            .err()
+            .expect("expected validation failure")
+            .to_string()
     }
 
     fn rewrite_evidence(evidence: &mut Vec<u8>, mutate: impl FnOnce(&mut FirstQuietWindowWire)) {
@@ -1012,6 +1375,23 @@ mod tests {
         });
     }
 
+    fn rebind_hardware(
+        evidence: &mut Vec<u8>,
+        bindings: &mut FirstQuietWindowBindings,
+        preimages: &mut PersistedFirstQuietWindowPreimages,
+        mutate: impl FnOnce(&mut HardwareProfileWire),
+    ) {
+        let mut value: HardwareProfileWire =
+            serde_json::from_slice(&preimages.hardware_bytes).unwrap();
+        mutate(&mut value);
+        preimages.hardware_bytes = bytes(&value);
+        preimages.hardware_fingerprint = fingerprint_bytes(&preimages.hardware_bytes).unwrap();
+        bindings.hardware_profile_fingerprint = preimages.hardware_fingerprint.clone();
+        rewrite_evidence(evidence, |wire| {
+            wire.hardware_profile_fingerprint = preimages.hardware_fingerprint.clone();
+        });
+    }
+
     fn rebind_process_set(
         evidence: &mut Vec<u8>,
         bindings: &mut FirstQuietWindowBindings,
@@ -1043,19 +1423,22 @@ mod tests {
         }
     }
 
-    fn policy() -> HostStabilityPolicy {
-        HostStabilityPolicy {
-            total_memory_bytes: 16_000,
-            maximum_total_cpu_percent: 20.0,
-            maximum_monitor_cpu_percent: 2.0,
-            maximum_unrelated_cpu_percent: 5.0,
-            minimum_available_memory_bytes: 8_000,
-            minimum_cpu_frequency_hz: 1_000,
-            maximum_temperature_millidegrees_celsius: 80_000,
-            forbidden_throttle_flags: vec!["power_limit".into(), "thermal".into()],
-            maximum_unrelated_process_count: 4,
-            unrelated_process_set_policy: "exact_baseline_match_v1".into(),
-            require_all_observations: true,
+    fn policy() -> ValidatedThresholdPolicy {
+        ValidatedThresholdPolicy {
+            fingerprint: fingerprint(),
+            policy: HostStabilityPolicy {
+                total_memory_bytes: 16_000,
+                maximum_total_cpu_percent: 20.0,
+                maximum_monitor_cpu_percent: 2.0,
+                maximum_unrelated_cpu_percent: 5.0,
+                minimum_available_memory_bytes: 8_000,
+                minimum_cpu_frequency_hz: 1_000,
+                maximum_temperature_millidegrees_celsius: 80_000,
+                forbidden_throttle_flags: vec!["power_limit".into(), "thermal".into()],
+                maximum_unrelated_process_count: 4,
+                unrelated_process_set_policy: "exact_baseline_match_v1".into(),
+                require_all_observations: true,
+            },
         }
     }
 
@@ -1309,6 +1692,353 @@ mod tests {
         assert_eq!(
             pending.capability.rustc_verbose_version(),
             bindings.rustc_verbose_version
+        );
+    }
+
+    #[test]
+    fn shared_threshold_validator_checks_bounds_hash_canonical_bytes_and_binding() {
+        let (_, bindings, preimages) = complete_fixture();
+        let hardware: HardwareProfileWire =
+            serde_json::from_slice(&preimages.hardware_bytes).unwrap();
+        let capability = validate_threshold_policy_bytes(
+            &preimages.thresholds_bytes,
+            &preimages.thresholds_fingerprint,
+            &bindings.campaign_id,
+            hardware.total_memory_bytes,
+        )
+        .unwrap();
+        assert_eq!(capability.fingerprint(), &preimages.thresholds_fingerprint);
+        assert_eq!(capability.maximum_unrelated_process_count(), 4);
+
+        let oversized = vec![b' '; MAX_ARTIFACT_BYTES + 1];
+        assert_eq!(
+            error(validate_threshold_policy_bytes(
+                &oversized,
+                &fingerprint(),
+                &bindings.campaign_id,
+                hardware.total_memory_bytes,
+            )),
+            "validity thresholds: actual bytes"
+        );
+        assert_eq!(
+            error(validate_threshold_policy_bytes(
+                &preimages.thresholds_bytes,
+                &fingerprint(),
+                &bindings.campaign_id,
+                hardware.total_memory_bytes,
+            )),
+            "validity thresholds: actual bytes"
+        );
+
+        let mut noncanonical = preimages.thresholds_bytes.clone();
+        noncanonical.push(b' ');
+        let noncanonical_fingerprint = fingerprint_bytes(&noncanonical).unwrap();
+        assert_eq!(
+            error(validate_threshold_policy_bytes(
+                &noncanonical,
+                &noncanonical_fingerprint,
+                &bindings.campaign_id,
+                hardware.total_memory_bytes,
+            )),
+            "validity thresholds: canonical bytes"
+        );
+
+        let mut wrong_campaign: ValidityThresholdsWire =
+            serde_json::from_slice(&preimages.thresholds_bytes).unwrap();
+        wrong_campaign.campaign_id = "018f4f9a-3f5b-4ae8-8a37-11c9fc12d999".into();
+        let wrong_campaign = bytes(&wrong_campaign);
+        let wrong_campaign_fingerprint = fingerprint_bytes(&wrong_campaign).unwrap();
+        assert_eq!(
+            error(validate_threshold_policy_bytes(
+                &wrong_campaign,
+                &wrong_campaign_fingerprint,
+                &bindings.campaign_id,
+                hardware.total_memory_bytes,
+            )),
+            "validity thresholds: binding"
+        );
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one shared-validator matrix keeps every capability and sanitized rejection boundary visible"
+    )]
+    #[test]
+    fn shared_preimage_validators_issue_only_bound_capabilities() {
+        let (_, bindings, preimages) = complete_fixture();
+        let hardware: HardwareProfileWire =
+            serde_json::from_slice(&preimages.hardware_bytes).unwrap();
+        let thresholds = validate_threshold_policy_bytes(
+            &preimages.thresholds_bytes,
+            &preimages.thresholds_fingerprint,
+            &bindings.campaign_id,
+            hardware.total_memory_bytes,
+        )
+        .unwrap();
+
+        let window = validate_initial_test_window_bytes(
+            &preimages.attestation_bytes,
+            &preimages.attestation_fingerprint,
+            &bindings.campaign_id,
+        )
+        .unwrap();
+        assert_eq!(window.fingerprint(), &preimages.attestation_fingerprint);
+        assert_eq!(window.target_role(), bindings.target_role);
+        assert_eq!(
+            window.target_identity_pseudonym(),
+            bindings.target_identity_pseudonym
+        );
+        assert_eq!(
+            window.change_reference_pseudonym(),
+            bindings.change_reference_pseudonym
+        );
+        validate_test_window_bytes(
+            &preimages.attestation_bytes,
+            &preimages.attestation_fingerprint,
+            &bindings.campaign_id,
+            &bindings.target_role,
+            &bindings.target_identity_pseudonym,
+            &bindings.change_reference_pseudonym,
+        )
+        .unwrap();
+
+        let host_wire = HostIdentityWire {
+            schema: "marty.performance/sd-jwt-issuance-host-identity/v1".into(),
+            campaign_id: bindings.campaign_id.clone(),
+            identity_scheme: "campaign_random_256_v1".into(),
+            host_identity_pseudonym: "C".repeat(64),
+            boot_identity_pseudonym: bindings.boot_identity_pseudonym.clone(),
+        };
+        let host_bytes = bytes(&host_wire);
+        let host_fingerprint = fingerprint_bytes(&host_bytes).unwrap();
+        let host = validate_host_identity_bytes(
+            &host_bytes,
+            &host_fingerprint,
+            &bindings.campaign_id,
+            &bindings.boot_identity_pseudonym,
+        )
+        .unwrap();
+        assert_eq!(host.fingerprint(), &host_fingerprint);
+        assert_eq!(host.host_identity_pseudonym(), "C".repeat(64));
+        assert_eq!(
+            host.boot_identity_pseudonym(),
+            bindings.boot_identity_pseudonym
+        );
+
+        let process_set = validate_process_set_bytes(
+            &preimages.baseline_process_set_bytes,
+            &preimages.baseline_process_set_fingerprint,
+            &bindings.campaign_id,
+            &bindings.boot_identity_pseudonym,
+            &thresholds,
+        )
+        .unwrap();
+        assert_eq!(
+            process_set.fingerprint(),
+            &preimages.baseline_process_set_fingerprint
+        );
+        assert_eq!(process_set.process_identity_pseudonyms(), &["D".repeat(64)]);
+
+        assert_eq!(
+            error(validate_initial_test_window_bytes(
+                &preimages.attestation_bytes,
+                &fingerprint(),
+                &bindings.campaign_id,
+            )),
+            "test window: actual bytes"
+        );
+        let mut noncanonical_window = preimages.attestation_bytes.clone();
+        noncanonical_window.push(b' ');
+        let noncanonical_window_fingerprint = fingerprint_bytes(&noncanonical_window).unwrap();
+        assert_eq!(
+            error(validate_initial_test_window_bytes(
+                &noncanonical_window,
+                &noncanonical_window_fingerprint,
+                &bindings.campaign_id,
+            )),
+            "test window: canonical bytes"
+        );
+        assert_eq!(
+            error(validate_test_window_bytes(
+                &preimages.attestation_bytes,
+                &preimages.attestation_fingerprint,
+                &bindings.campaign_id,
+                "isolated_production_gateway",
+                &bindings.target_identity_pseudonym,
+                &bindings.change_reference_pseudonym,
+            )),
+            "test window: identity binding"
+        );
+        let mut colliding_aliases: FirstQuietWindowAttestationWire =
+            serde_json::from_slice(&preimages.attestation_bytes).unwrap();
+        colliding_aliases.change_reference_pseudonym =
+            colliding_aliases.target_identity_pseudonym.clone();
+        let colliding_aliases = bytes(&colliding_aliases);
+        let colliding_aliases_fingerprint = fingerprint_bytes(&colliding_aliases).unwrap();
+        assert_eq!(
+            error(validate_initial_test_window_bytes(
+                &colliding_aliases,
+                &colliding_aliases_fingerprint,
+                &bindings.campaign_id,
+            )),
+            "test window: semantics"
+        );
+
+        let mut noncanonical_host = host_bytes.clone();
+        noncanonical_host.push(b' ');
+        let noncanonical_host_fingerprint = fingerprint_bytes(&noncanonical_host).unwrap();
+        assert_eq!(
+            error(validate_host_identity_bytes(
+                &noncanonical_host,
+                &noncanonical_host_fingerprint,
+                &bindings.campaign_id,
+                &bindings.boot_identity_pseudonym,
+            )),
+            "host identity: canonical bytes"
+        );
+        assert_eq!(
+            error(validate_host_identity_bytes(
+                &host_bytes,
+                &host_fingerprint,
+                &bindings.campaign_id,
+                &"9".repeat(64),
+            )),
+            "host identity: semantics"
+        );
+
+        let mut noncanonical_set = preimages.baseline_process_set_bytes.clone();
+        noncanonical_set.push(b' ');
+        let noncanonical_set_fingerprint = fingerprint_bytes(&noncanonical_set).unwrap();
+        assert_eq!(
+            error(validate_process_set_bytes(
+                &noncanonical_set,
+                &noncanonical_set_fingerprint,
+                &bindings.campaign_id,
+                &bindings.boot_identity_pseudonym,
+                &thresholds,
+            )),
+            "unrelated process set: canonical bytes"
+        );
+        assert_eq!(
+            error(validate_process_set_bytes(
+                &preimages.baseline_process_set_bytes,
+                &preimages.baseline_process_set_fingerprint,
+                &bindings.campaign_id,
+                &"9".repeat(64),
+                &thresholds,
+            )),
+            "unrelated process set: semantics"
+        );
+    }
+
+    #[test]
+    fn shared_observation_predicate_checks_nonzero_benchmark_cpu() {
+        let thresholds = policy();
+        let flags = vec!["none".to_owned()];
+        let valid = || HostObservation {
+            total_cpu_percent: 10.0,
+            monitor_cpu_percent: 1.0,
+            benchmark_cpu_percent: 6.0,
+            unrelated_cpu_percent: 2.0,
+            available_memory_bytes: 10_000,
+            cpu_frequency_hz: 2_000,
+            maximum_temperature_millidegrees_celsius: 50_000,
+            throttle_flags: &flags,
+        };
+        thresholds.validate_observation(&valid()).unwrap();
+
+        let mut non_finite = valid();
+        non_finite.benchmark_cpu_percent = f64::NAN;
+        assert_eq!(
+            thresholds
+                .validate_observation(&non_finite)
+                .unwrap_err()
+                .to_string(),
+            "host observation: CPU"
+        );
+        let mut out_of_range = valid();
+        out_of_range.benchmark_cpu_percent = 101.0;
+        assert!(thresholds.validate_observation(&out_of_range).is_err());
+        let mut above_total = valid();
+        above_total.benchmark_cpu_percent = 11.0;
+        assert!(thresholds.validate_observation(&above_total).is_err());
+        let mut component_sum = valid();
+        component_sum.benchmark_cpu_percent = 8.0;
+        assert!(thresholds.validate_observation(&component_sum).is_err());
+
+        let boundary = HostObservation {
+            total_cpu_percent: 10.0,
+            monitor_cpu_percent: 0.0,
+            benchmark_cpu_percent: 10.0,
+            unrelated_cpu_percent: 0.0,
+            available_memory_bytes: 10_000,
+            cpu_frequency_hz: 2_000,
+            maximum_temperature_millidegrees_celsius: 50_000,
+            throttle_flags: &flags,
+        };
+        thresholds.validate_observation(&boundary).unwrap();
+    }
+
+    #[test]
+    fn shared_refactor_preserves_legacy_first_window_acceptance_and_error_precedence() {
+        let (mut evidence, mut bindings, mut preimages) = complete_fixture();
+        rebind_attestation(&mut evidence, &mut preimages, |value| {
+            value.change_reference_pseudonym = value.target_identity_pseudonym.clone();
+        });
+        bindings.change_reference_pseudonym = bindings.target_identity_pseudonym.clone();
+        validate_first_quiet_window_semantics(&evidence, &bindings, &preimages).unwrap();
+
+        let (mut evidence, bindings, mut preimages) = complete_fixture();
+        preimages.attestation_bytes.push(b' ');
+        preimages.attestation_fingerprint =
+            fingerprint_bytes(&preimages.attestation_bytes).unwrap();
+        rewrite_evidence(&mut evidence, |wire| {
+            wire.first_quiet_window_attestation_fingerprint =
+                preimages.attestation_fingerprint.clone();
+        });
+        assert_eq!(
+            validate_first_quiet_window_semantics(&evidence, &bindings, &preimages)
+                .unwrap_err()
+                .to_string(),
+            "first quiet window: attestation canonical bytes"
+        );
+
+        let (mut evidence, mut bindings, mut preimages) = complete_fixture();
+        rebind_hardware(&mut evidence, &mut bindings, &mut preimages, |value| {
+            value.campaign_id = "018f4f9a-3f5b-4ae8-8a37-11c9fc12d999".into();
+        });
+        preimages.thresholds_bytes.push(b' ');
+        preimages.thresholds_fingerprint = fingerprint_bytes(&preimages.thresholds_bytes).unwrap();
+        bindings.validity_thresholds_fingerprint = preimages.thresholds_fingerprint.clone();
+        rewrite_evidence(&mut evidence, |wire| {
+            wire.validity_thresholds_fingerprint = preimages.thresholds_fingerprint.clone();
+        });
+        assert_eq!(
+            validate_first_quiet_window_semantics(&evidence, &bindings, &preimages)
+                .unwrap_err()
+                .to_string(),
+            "first quiet window: thresholds canonical bytes"
+        );
+
+        let (mut evidence, mut bindings, mut preimages) = complete_fixture();
+        preimages.baseline_process_set_bytes.push(b' ');
+        preimages.baseline_process_set_fingerprint =
+            fingerprint_bytes(&preimages.baseline_process_set_bytes).unwrap();
+        bindings.baseline_unrelated_process_set_fingerprint =
+            preimages.baseline_process_set_fingerprint.clone();
+        rewrite_evidence(&mut evidence, |wire| {
+            wire.baseline_unrelated_process_set_fingerprint =
+                preimages.baseline_process_set_fingerprint.clone();
+            for sample in &mut wire.samples {
+                sample.unrelated_process_set_fingerprint =
+                    preimages.baseline_process_set_fingerprint.clone();
+            }
+        });
+        assert_eq!(
+            validate_first_quiet_window_semantics(&evidence, &bindings, &preimages)
+                .unwrap_err()
+                .to_string(),
+            "first quiet window: process set canonical bytes"
         );
     }
 
@@ -1616,7 +2346,7 @@ mod tests {
         let mut value = observation();
         value.samples[0].throttle_flags = vec!["thermal".into()];
         let mut empty_forbidden = policy();
-        empty_forbidden.forbidden_throttle_flags.clear();
+        empty_forbidden.policy.forbidden_throttle_flags.clear();
         assert!(value.validate(&attestation(), &empty_forbidden).is_err());
         let mut power_limited = observation();
         power_limited.samples[0].throttle_flags = vec!["power_limit".into()];

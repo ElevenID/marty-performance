@@ -538,6 +538,108 @@ pub struct SdJwtIssuanceIndexedAnalysisReport {
     pub limitations: Vec<String>,
 }
 
+/// Nonactivating validation of every retained validity segment and lifecycle
+/// record.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceLifecycleAnalysisReport {
+    /// Must be `marty.performance/sd-jwt-issuance-lifecycle-analysis/v1`.
+    pub schema: String,
+    /// Must be `complete_segment_chain_and_embedded_lifecycle_semantics_v1`.
+    pub analysis_scope: String,
+    /// Bound campaign UUID.
+    pub campaign_id: String,
+    /// Exact canonical qualification manifest.
+    pub manifest: ArtifactFingerprint,
+    /// Exact canonical V3 qualification plan.
+    pub plan: ArtifactFingerprint,
+    /// Full benchmark ID of the route witness used by the common analyzer pipeline.
+    pub selected_route_benchmark_id: String,
+    /// Exact selected route witness.
+    pub selected_route_artifact: ArtifactFingerprint,
+    /// Fixed-build target; results from different targets are never pooled.
+    pub target_triple: String,
+    /// Exact retained hardware profile used for observation bounds.
+    pub hardware_profile: ArtifactFingerprint,
+    /// Exact retained host-identity profile bound by genesis.
+    pub host_identity: ArtifactFingerprint,
+    /// Exact controller binary bound by genesis.
+    pub controller_binary: ArtifactFingerprint,
+    /// Exact monitor binary bound by genesis.
+    pub monitor_binary: ArtifactFingerprint,
+    /// Exact controller configuration bound by genesis.
+    pub controller_configuration: ArtifactFingerprint,
+    /// Exact monitor configuration bound by genesis.
+    pub monitor_configuration: ArtifactFingerprint,
+    /// Exact external-anchor channel configuration bound by genesis and completion.
+    pub external_anchor_channel_configuration: ArtifactFingerprint,
+    /// Exact approved source archive used for the fixed build.
+    pub source_archive: ArtifactFingerprint,
+    /// Exact Cargo lockfile used for the fixed build.
+    pub cargo_lock: ArtifactFingerprint,
+    /// Exact fixed-build receipt.
+    pub build_receipt: ArtifactFingerprint,
+    /// Exact fixed-build input inventory.
+    pub build_input_inventory: ArtifactFingerprint,
+    /// Exact fixed-build input archive.
+    pub build_input_archive: ArtifactFingerprint,
+    /// Installed fixed benchmark binary.
+    pub fixed_binary: ArtifactFingerprint,
+    /// Exact signed terminal-observation receipt.
+    pub terminal_observation_receipt: ArtifactFingerprint,
+    /// Exact controller-observed terminal evidence wrapper.
+    pub terminal_observation_evidence: ArtifactFingerprint,
+    /// Exact campaign completion manifest.
+    pub completion: ArtifactFingerprint,
+    /// Exact signed completion anchor.
+    pub completion_anchor: ArtifactFingerprint,
+    /// Complete ordered validity-segment chain validated by this report.
+    pub ordered_segment_fingerprints: Vec<ArtifactFingerprint>,
+    /// Complete ordered actual timing-window attestation chain.
+    pub ordered_test_window_attestation_fingerprints: Vec<ArtifactFingerprint>,
+    /// Exact validity-threshold preimage applied to every sample.
+    pub validity_thresholds: ArtifactFingerprint,
+    /// Exact baseline and sole content-addressed unrelated-process set required
+    /// by every sample.
+    pub baseline_unrelated_process_set: ArtifactFingerprint,
+    /// Number of chained segments.
+    pub segment_count: u32,
+    /// Checked sum of exact segment byte lengths.
+    pub segment_bytes: u64,
+    /// Checked number of records including headers and footers.
+    pub record_count: u64,
+    /// Number of contiguous monitor samples.
+    pub sample_count: u64,
+    /// Number of process and attestation-transition event records.
+    pub lifecycle_event_count: u64,
+    /// Number of process-intent records.
+    pub process_intent_count: u32,
+    /// Number of process-start records.
+    pub process_start_count: u32,
+    /// Number of process-finish records.
+    pub process_finish_count: u32,
+    /// Number of actual timing-window attestation transitions.
+    pub attestation_transition_count: u32,
+    /// Genesis controller-monotonic timestamp.
+    pub first_monotonic_nanoseconds: u64,
+    /// Terminal-footer controller-monotonic timestamp.
+    pub last_monotonic_nanoseconds: u64,
+    /// Integrity result for every artifact traversed by this command.
+    pub artifact_integrity_status: String,
+    /// Result of the bounded segment and lifecycle state-machine replay.
+    pub embedded_lifecycle_semantics_status: String,
+    /// Complete campaign qualification remains a separate phase.
+    pub campaign_qualification_status: String,
+    /// This report can never activate a production threshold.
+    pub production_threshold_activation: bool,
+    /// Activation requires a later, separately reviewed change.
+    pub production_activation_separate: bool,
+    /// Always absent from this nonactivating analysis schema.
+    pub qualified_issuance_thresholds: Option<SdJwtIssuanceThresholds>,
+    /// Truthful boundaries on what this analysis establishes.
+    pub limitations: Vec<String>,
+}
+
 /// Frozen pre-analysis protocol for one SD-JWT issuance campaign.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

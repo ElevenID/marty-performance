@@ -236,6 +236,8 @@ enum IssuanceQualificationCommand {
     Analyze(IssuanceQualificationAnalyzeArgs),
     /// Analyze every indexed route and Criterion median without activating thresholds.
     AnalyzeIndexed(IssuanceQualificationAnalyzeArgs),
+    /// Validate the complete segment chain and embedded lifecycle semantics.
+    AnalyzeLifecycle(IssuanceQualificationAnalyzeArgs),
     /// Work with an approved exact Git source archive without starting a campaign.
     SourceArchive(IssuanceSourceArchiveArgs),
 }
@@ -408,6 +410,9 @@ fn main() -> Result<()> {
                 IssuanceQualificationCommand::AnalyzeIndexed(args) => {
                     issuance_qualification::analyze_indexed(&args.analysis_request())
                 }
+                IssuanceQualificationCommand::AnalyzeLifecycle(args) => {
+                    issuance_qualification::analyze_lifecycle(&args.analysis_request())
+                }
                 IssuanceQualificationCommand::SourceArchive(args) => match args.command {
                     IssuanceSourceArchiveCommand::Export(args) => {
                         let receipt =
@@ -512,6 +517,47 @@ mod qualification_analyze_cli_tests {
             Path::new("/trust/anchor-public-key.bin")
         );
         assert_eq!(request.output, Path::new("/reports/indexed-analysis.json"));
+    }
+
+    #[test]
+    fn analyze_lifecycle_command_preserves_all_offline_inputs_through_dispatch() {
+        let cli = Cli::try_parse_from([
+            "marty-perf",
+            "qualification",
+            "issuance",
+            "analyze-lifecycle",
+            "--campaign-root",
+            "/campaign-root",
+            "--route-artifact",
+            "routes/r00_c00_e0.ndjson",
+            "--anchor-public-key",
+            "/trust/anchor-public-key.bin",
+            "--output",
+            "/reports/lifecycle-analysis.json",
+        ])
+        .expect("parse lifecycle analyzer command");
+        let Command::Qualification(qualification) = cli.command else {
+            panic!("qualification command")
+        };
+        let QualificationCommand::Issuance(issuance) = qualification.command;
+        let IssuanceQualificationCommand::AnalyzeLifecycle(args) = issuance.command else {
+            panic!("analyze-lifecycle command")
+        };
+
+        let request = args.analysis_request();
+        assert_eq!(request.campaign_root, Path::new("/campaign-root"));
+        assert_eq!(
+            request.route_artifact,
+            Path::new("routes/r00_c00_e0.ndjson")
+        );
+        assert_eq!(
+            request.anchor_public_key,
+            Path::new("/trust/anchor-public-key.bin")
+        );
+        assert_eq!(
+            request.output,
+            Path::new("/reports/lifecycle-analysis.json")
+        );
     }
 
     #[test]

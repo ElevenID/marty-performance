@@ -45,6 +45,8 @@ queue, and cryptographic stages.
 
 ## M4 — Native optimization loop
 
+- [x] Add nonactivating selected-route, indexed-timing, and complete
+  segment-chain/embedded-lifecycle qualification analyzers.
 - Expand Criterion coverage in the owning Rust crates.
 - Add service-level benchmarks for gateway and dependency boundaries.
 - Capture Linux `perf` and flamegraphs only in diagnostic mode.

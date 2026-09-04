@@ -277,6 +277,10 @@ impl<'a> QualificationSchedule<'a> {
         self.processes.iter()
     }
 
+    pub(super) fn at(&self, position: usize) -> Option<&ScheduledProcess<'a>> {
+        self.processes.get(position)
+    }
+
     pub(super) fn get(&self, coordinate: ProcessCoordinate) -> Option<&ScheduledProcess<'a>> {
         let cells = u32::try_from(PAIRED_CELL_COUNT).ok()?;
         let position = coordinate

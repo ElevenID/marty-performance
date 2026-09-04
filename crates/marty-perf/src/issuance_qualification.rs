@@ -19,11 +19,12 @@ use marty_perf_schema::{
     SdJwtIssuanceEvidenceRecordProtocol, SdJwtIssuanceFirstQuietWindowProtocol,
     SdJwtIssuanceGlobalPreimageProtocol, SdJwtIssuanceGlobalRoundProtocol,
     SdJwtIssuanceIndexedAnalysisReport, SdJwtIssuanceInvocationDescriptorProtocol,
-    SdJwtIssuanceLaunchBarrierProtocol, SdJwtIssuanceObservationBounds,
-    SdJwtIssuanceQualificationManifest, SdJwtIssuanceQualificationPlan,
-    SdJwtIssuanceRouteArtifactProtocol, SdJwtIssuanceRunValidityCompletionProtocol,
-    SdJwtIssuanceRunValidityLimits, SdJwtIssuanceRunValidityProtocol,
-    SdJwtIssuanceRunValidityRecordProtocols, MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES,
+    SdJwtIssuanceLaunchBarrierProtocol, SdJwtIssuanceLifecycleAnalysisReport,
+    SdJwtIssuanceObservationBounds, SdJwtIssuanceQualificationManifest,
+    SdJwtIssuanceQualificationPlan, SdJwtIssuanceRouteArtifactProtocol,
+    SdJwtIssuanceRunValidityCompletionProtocol, SdJwtIssuanceRunValidityLimits,
+    SdJwtIssuanceRunValidityProtocol, SdJwtIssuanceRunValidityRecordProtocols,
+    MAX_SD_JWT_ISSUANCE_PLAN_V3_BYTES,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha1::Sha1;
@@ -56,6 +57,7 @@ mod fixed_build;
     reason = "the nonactivating fixed-build capture capability is future controller plumbing"
 )]
 mod fixed_build_capture;
+mod lifecycle_validation;
 mod schedule;
 #[allow(
     dead_code,
@@ -4937,7 +4939,15 @@ impl SegmentPrefixState {
     }
 }
 
-fn inspect_segment(input: OpenedInput, role: &'static str) -> Result<SegmentInspection> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bounded streaming parser keeps snapshot, line, canonicality, and observer ordering visible"
+)]
+fn inspect_segment_with_observer(
+    input: OpenedInput,
+    role: &'static str,
+    mut observe: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<SegmentInspection> {
     const MAXIMUM_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
     const MAXIMUM_LINE_BYTES: u64 = 64 * 1024;
     const MAXIMUM_RECORDS: u32 = 65_536;
@@ -4989,6 +4999,7 @@ fn inspect_segment(input: OpenedInput, role: &'static str) -> Result<SegmentInsp
         }
         if let Some(previous) = previous_line.replace(line) {
             prefix_state.observe(&previous, role)?;
+            observe(&previous).map_err(|_| anyhow::anyhow!("analysis rejected: {role}"))?;
             prefix_hasher.update(&previous);
             prefix_bytes = prefix_bytes
                 .checked_add(
@@ -5041,6 +5052,10 @@ fn inspect_segment(input: OpenedInput, role: &'static str) -> Result<SegmentInsp
     })
 }
 
+fn inspect_segment(input: OpenedInput, role: &'static str) -> Result<SegmentInspection> {
+    inspect_segment_with_observer(input, role, |_| Ok(()))
+}
+
 fn inspect_campaign_segment(
     budget: &mut AnalysisReadBudget,
     campaign: &CampaignDirectory,
@@ -5050,6 +5065,18 @@ fn inspect_campaign_segment(
     let input = campaign.open_file(relative, 64 * 1024 * 1024, role)?;
     budget.charge(&input)?;
     inspect_segment(input, role)
+}
+
+fn inspect_campaign_segment_with_observer(
+    budget: &mut AnalysisReadBudget,
+    campaign: &CampaignDirectory,
+    relative: &Path,
+    role: &'static str,
+    observe: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<SegmentInspection> {
+    let input = campaign.open_file(relative, 64 * 1024 * 1024, role)?;
+    budget.charge(&input)?;
+    inspect_segment_with_observer(input, role, observe)
 }
 
 #[cfg(test)]
@@ -5573,6 +5600,7 @@ fn write_analysis_report(
 enum AnalysisScope {
     SelectedRoute,
     IndexedTimingArtifacts,
+    Lifecycle,
 }
 
 /// Validate the bounded offline artifact-integrity slice of one V3 campaign.
@@ -5583,6 +5611,11 @@ pub(crate) fn analyze(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
 /// Validate and analyze every indexed route and Criterion estimate artifact.
 pub(crate) fn analyze_indexed(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
     analyze_with_scope(request, AnalysisScope::IndexedTimingArtifacts)
+}
+
+/// Validate every retained validity segment and its lifecycle record semantics.
+pub(crate) fn analyze_lifecycle(request: &IssuanceAnalysisRequest<'_>) -> Result<()> {
+    analyze_with_scope(request, AnalysisScope::Lifecycle)
 }
 
 #[allow(
@@ -6222,6 +6255,100 @@ fn analyze_with_scope(request: &IssuanceAnalysisRequest<'_>, scope: AnalysisScop
             write_analysis_report(request.output, Some(campaign.identity), &report)?;
             println!(
                 "Analyzed all indexed Criterion median estimates and route artifacts; campaign qualification and production activation remain not evaluated."
+            );
+        }
+        AnalysisScope::Lifecycle => {
+            let lifecycle = lifecycle_validation::validate_campaign_lifecycle(
+                &campaign,
+                &mut read_budget,
+                &schedule,
+                &completion,
+                &genesis,
+                &hardware,
+                &plan,
+                &terminal_receipt,
+                &completion_anchor,
+            )?;
+            let report = SdJwtIssuanceLifecycleAnalysisReport {
+                schema: "marty.performance/sd-jwt-issuance-lifecycle-analysis/v1".to_owned(),
+                analysis_scope: "complete_segment_chain_and_embedded_lifecycle_semantics_v1"
+                    .to_owned(),
+                campaign_id: build_receipt.campaign_id,
+                manifest: manifest_fingerprint,
+                plan: plan_fingerprint,
+                selected_route_benchmark_id: route_expectation.full_benchmark_id.to_owned(),
+                selected_route_artifact: route_fingerprint,
+                target_triple: build_receipt.target_triple,
+                hardware_profile: hardware_fingerprint,
+                host_identity: lifecycle.host_identity_fingerprint,
+                controller_binary: controller_fingerprint,
+                monitor_binary: monitor_fingerprint,
+                controller_configuration: controller_configuration_fingerprint,
+                monitor_configuration: monitor_configuration_fingerprint,
+                external_anchor_channel_configuration: anchor_configuration_fingerprint,
+                source_archive: source_archive_fingerprint,
+                cargo_lock: cargo_lock_fingerprint,
+                build_receipt: build_receipt_fingerprint,
+                build_input_inventory: inventory_fingerprint,
+                build_input_archive: build_archive_fingerprint,
+                fixed_binary: fixed_binary_fingerprint,
+                terminal_observation_receipt: terminal_receipt_fingerprint,
+                terminal_observation_evidence: terminal_evidence_fingerprint,
+                completion: completion_fingerprint,
+                completion_anchor: completion_anchor_fingerprint,
+                ordered_segment_fingerprints: lifecycle.ordered_segment_fingerprints,
+                ordered_test_window_attestation_fingerprints: lifecycle
+                    .ordered_test_window_attestation_fingerprints,
+                validity_thresholds: lifecycle.validity_thresholds_fingerprint,
+                baseline_unrelated_process_set: lifecycle
+                    .baseline_unrelated_process_set_fingerprint,
+                segment_count: lifecycle.segment_count,
+                segment_bytes: lifecycle.segment_bytes,
+                record_count: lifecycle.record_count,
+                sample_count: lifecycle.sample_count,
+                lifecycle_event_count: lifecycle.lifecycle_event_count,
+                process_intent_count: lifecycle.process_intent_count,
+                process_start_count: lifecycle.process_start_count,
+                process_finish_count: lifecycle.process_finish_count,
+                attestation_transition_count: lifecycle.attestation_transition_count,
+                first_monotonic_nanoseconds: lifecycle.first_monotonic_nanoseconds,
+                last_monotonic_nanoseconds: lifecycle.last_monotonic_nanoseconds,
+                artifact_integrity_status: "valid".to_owned(),
+                embedded_lifecycle_semantics_status: "valid".to_owned(),
+                campaign_qualification_status: "not_evaluated".to_owned(),
+                production_threshold_activation: false,
+                production_activation_separate: true,
+                qualified_issuance_thresholds: None,
+                limitations: vec![
+                    "nonselected_route_artifact_contents_not_traversed".to_owned(),
+                    "criterion_estimate_artifact_contents_not_traversed".to_owned(),
+                    "criterion_and_route_artifact_indexes_not_traversed".to_owned(),
+                    "invocation_launch_barrier_and_criterion_inventory_preimage_contents_not_traversed"
+                        .to_owned(),
+                    "complete_criterion_artifact_homes_not_traversed".to_owned(),
+                    "first_quiet_window_attestation_content_not_traversed".to_owned(),
+                    "first_quiet_window_evidence_content_and_build_order_not_analyzed".to_owned(),
+                    "retained_build_tree_offline_probe_not_reexecuted".to_owned(),
+                    "nonterminal_close_reason_counterfactual_precedence_not_reconstructed"
+                        .to_owned(),
+                    "operator_authorization_raw_target_mapping_and_shutdown_recheck_not_independently_reauthenticated"
+                        .to_owned(),
+                    "cross_role_nonce_and_pseudonym_uniqueness_not_fully_reconstructed"
+                        .to_owned(),
+                    "operator_selected_anchor_key_trust_provenance_not_established".to_owned(),
+                    "cross_file_consistency_requires_quiescent_or_snapshotted_campaign"
+                        .to_owned(),
+                    "output_parent_ancestry_requires_quiescent_namespace".to_owned(),
+                    "failed_post_publication_verification_may_leave_a_nonactivating_create_new_report"
+                        .to_owned(),
+                    "report_publication_crash_durability_depends_on_operating_system_and_filesystem"
+                        .to_owned(),
+                    "no_performance_threshold_or_activation_claim".to_owned(),
+                ],
+            };
+            write_analysis_report(request.output, Some(campaign.identity), &report)?;
+            println!(
+                "Validated the complete segment chain and embedded lifecycle semantics; campaign qualification and production activation remain not evaluated."
             );
         }
     }
@@ -14018,4 +14145,7 @@ mod tests {
             .to_string();
         assert_eq!(error, "analysis rejected: bounded segment");
     }
+
+    #[path = "lifecycle_analysis_tests.rs"]
+    mod lifecycle_analysis_tests;
 }

@@ -81,15 +81,47 @@ indexed report therefore marks tail latency and throughput as `not_evaluated`,
 allocation and SIMD-lane evidence as `not_measured`, campaign qualification as
 `not_evaluated`, and production-threshold activation as `false`.
 
-Both commands verify the exact V3 plan/manifest binding, the coordinate-selected
-route record against the retained hardware profile, the source Git tree/commit
-and Cargo.lock, typed controller and monitor configurations, the typed build
-receipt and streamed build-input archive, installed binary fingerprints, the
+The lifecycle analyzer applies the common trust pipeline, then opens every
+completion-bound segment and actual timing-window attestation in order. It
+validates the complete segment fingerprint chain and footer aggregates, one
+controller UTC-to-monotonic affine mapping, contiguous event and sample
+ordinals, active-attestation coverage for every traversed segment record and
+footer plus the terminal request, continuous pre-timing monitor coverage, and
+all 10,560 serial process intent/start/finish triples against the frozen schedule
+and completion bindings. It also validates the exact host identity,
+validity-threshold, and baseline unrelated-process-set preimages used for every
+sample, and proves that baseline is the sole content-addressed observed process
+set:
+
+    cargo run --locked -- qualification issuance analyze-lifecycle \
+      --campaign-root <absolute-campaign-root> \
+      --route-artifact routes/r00_c00_e0.ndjson \
+      --anchor-public-key <out-of-band-raw-32-byte-ed25519-key> \
+      --output <absolute-new-lifecycle-analysis.json>
+
+Its scope literal is
+`complete_segment_chain_and_embedded_lifecycle_semantics_v1`. A `valid`
+`artifact_integrity_status` covers only artifacts actually traversed by this
+command. It does not cover nonselected route or Criterion-estimate contents,
+the Criterion or route indexes, complete Criterion homes, invocation, barrier,
+or inventory preimage contents, the first-quiet-window attestation or evidence
+contents, or other limitations listed in the report. Its bounded
+`embedded_lifecycle_semantics_status` does not reconstruct nonterminal
+close-trigger counterfactual precedence or protocol-wide uniqueness against
+untraversed nonce preimages. Qualification and activation remain false or not
+evaluated.
+
+All three commands verify the exact V3 plan/manifest binding, the
+coordinate-selected route record against the retained hardware profile, the
+source Git tree/commit and Cargo.lock, typed controller and monitor
+configurations, the typed build receipt and streamed build-input archive,
+installed binary fingerprints, the
 anchored genesis, the terminal segment's bounded record envelopes and footer
 summary, and both offline anchor signatures and their same-clock publication
-bound. For each record using one of the six lifecycle variants in either
-inspected segment, typed validation requires the frozen complete deny-unknown
-payload shape and exact compact canonical bytes: continuation, sample,
+bound. In selected-route and indexed modes, each record using one of the six
+lifecycle variants in either inspected segment requires the frozen complete
+deny-unknown payload shape and exact compact canonical bytes: continuation,
+sample,
 process-intent, process-start, process-finish, and attestation-transition. The
 segment-zero genesis header is separately typed and canonicalized, as is only
 the terminal segment footer. When the genesis and terminal segments differ,
@@ -100,10 +132,11 @@ inspected segments separately binds campaign, segment and contiguous record
 ordinals, exact UTC grammar, and nondecreasing monotonic values. Validation
 of the terminal segment footer alone additionally binds its header/footer
 time bounds and the five reconstructed terminal-segment type counters.
-Neither analyzer traverses or chains intermediate segments or validates
-complete within-record and cross-record lifecycle semantics. Governed inputs
-are opened relative to
-retained directory handles without following links; regular files must have
+Those two modes do not traverse or chain intermediate segments or validate
+complete within-record and cross-record lifecycle semantics; the opt-in
+lifecycle mode performs that bounded replay. Governed inputs are opened
+relative to retained directory handles without following links; regular files
+must have
 one link and remain the same size, identity, and stable metadata through their
 exact-length read. Unix file and directory-component opens also set
 nonblocking and no-controlling-terminal flags before the retained-handle type
@@ -123,28 +156,29 @@ must be outside the retained campaign root. The selected-route report scope is
 qualification as `not_evaluated` and production-threshold activation as
 `false`. The indexed report scope is
 `all_indexed_route_and_criterion_estimate_artifacts_v1` and retains the same
-nonactivating decisions. Intermediate run-validity segment traversal and chain
-validation, lifecycle semantics, complete Criterion-home traversal, tail
-latency, throughput, allocation, SIMD-lane evidence, target-campaign threshold
-discovery, activation, and re-execution of the retained build tree's offline
-dependency-resolution probe remain separate future analyzer phases. Both
-commands verify the receipt's exact probe command and retained result; they do
-not materialize that tree or run the command. They also do not validate
+nonactivating decisions. The lifecycle report uses the bounded scope described
+above and also remains nonactivating. Complete Criterion-home traversal, full
+auxiliary process-preimage traversal, first-quiet-window content and build-order
+validation, tail latency, throughput, allocation, SIMD-lane evidence,
+target-campaign threshold discovery, activation, and re-execution of the
+retained build tree's offline dependency-resolution probe remain separate
+future analyzer phases. All three commands verify the receipt's exact probe
+command and retained result; they do not materialize that tree or run the
+command. They also do not validate
 first-quiet-window contents or prove the build began after that window. Run
 analysis only against a quiescent campaign directory or
 an immutable filesystem snapshot: per-file handle binding does not make the
 multi-file traversal one atomic snapshot.
 
-Both reports are always nonactivating. If a file or parent durability/identity
+All reports are always nonactivating. If a file or parent durability/identity
 check fails after the create-new publication step, the command returns an
-error, but the already published nonactivating report may remain. Neither
-analyzer attempts a pathname cleanup that could target a concurrently replaced
-entry.
+error, but the already published nonactivating report may remain. No analyzer
+attempts a pathname cleanup that could target a concurrently replaced entry.
 
 `--anchor-public-key` is an operator-selected trust input. It must be an
 absolute, read-only, single-link 32-byte file outside the campaign tree. Each
 analyzer proves that the campaign configuration and signatures bind that key;
-neither proves that the key was independently preconfigured or trusted.
+none proves that the key was independently preconfigured or trusted.
 
 The plan command rejects changed matrix cardinality, route or estimator
 versions, noncanonical bytes, activated production thresholds, reused
@@ -502,11 +536,14 @@ processes but does not execute them or activate a production threshold. Frozen
 v1 or v2 evidence must not be reinterpreted as v3.
 
 Fixed-build execution, complete Criterion artifact-home traversal,
-first-window and complete lifecycle validation, individual-operation tail
+first-window content and build-order validation, auxiliary process-preimage
+validation beyond the embedded segment records, individual-operation tail
 latency, end-to-end throughput, allocation and SIMD/lane measurements, target
 campaign execution, threshold discovery, and production activation all remain
-later work. Indexed analysis never pools a target triple, hardware profile,
-fixed binary, build receipt, manifest, or plan with another campaign.
+later work. The lifecycle analyzer validates the complete retained segment
+chain and its embedded lifecycle semantics within the explicit limitations
+above. Indexed analysis never pools a target triple, hardware profile, fixed
+binary, build receipt, manifest, or plan with another campaign.
 
 ## Test window
 

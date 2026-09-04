@@ -393,6 +393,151 @@ pub struct SdJwtIssuanceThresholds {
     pub min_estimated_work_bytes: usize,
 }
 
+/// Status for a metric that this analysis intentionally does not claim.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdJwtIssuanceAnalysisStatus {
+    /// The retained evidence is not sufficient to evaluate this metric.
+    NotEvaluated,
+    /// This campaign protocol did not measure this metric.
+    NotMeasured,
+}
+
+/// One observed paired log effect and its predeclared confidence interval.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceEffectInterval {
+    /// `simultaneous_common_max_deviation_95_percent` or
+    /// `marginal_type_7_95_percent`.
+    pub interval_method: String,
+    /// Mean observed log ratio across the twenty bound global rounds.
+    pub point_estimate_log_ratio: f64,
+    /// Lower confidence endpoint in log-ratio units.
+    pub lower_log_ratio: f64,
+    /// Upper confidence endpoint in log-ratio units.
+    pub upper_log_ratio: f64,
+    /// Monotonic `100 * (exp(effect) - 1)` transform of the point estimate.
+    pub point_estimate_relative_percent: f64,
+    /// Monotonic relative-percent transform of the lower endpoint.
+    pub lower_relative_percent: f64,
+    /// Monotonic relative-percent transform of the upper endpoint.
+    pub upper_relative_percent: f64,
+}
+
+/// Ordered paired-effect result for one manifest cell.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceCellEffects {
+    /// Zero-based position in the manifest's paired-cell array.
+    pub cell_ordinal: u32,
+    /// Stable synthetic fixture identifier.
+    pub fixture_id: String,
+    /// `executor_assembly` or `full_issuance`.
+    pub stage: String,
+    /// Full Criterion ID of the serial oracle.
+    pub serial_benchmark_id: String,
+    /// Full Criterion ID of the adaptive candidate.
+    pub adaptive_benchmark_id: String,
+    /// Combined route effect, adaptive over serial.
+    pub d: SdJwtIssuanceEffectInterval,
+    /// Serial-first paired effect, adaptive over serial.
+    pub s: SdJwtIssuanceEffectInterval,
+    /// Adaptive-first paired effect, adaptive over serial.
+    pub p: SdJwtIssuanceEffectInterval,
+    /// Disclosed order diagnostic, `S - P`.
+    pub o: SdJwtIssuanceEffectInterval,
+}
+
+/// Nonactivating analysis of every indexed SD-JWT issuance timing estimate.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdJwtIssuanceIndexedAnalysisReport {
+    /// Must be `marty.performance/sd-jwt-issuance-indexed-analysis/v1`.
+    pub schema: String,
+    /// Must be `all_indexed_route_and_criterion_estimate_artifacts_v1`.
+    pub analysis_scope: String,
+    /// Bound campaign UUID.
+    pub campaign_id: String,
+    /// Exact canonical qualification manifest.
+    pub manifest: ArtifactFingerprint,
+    /// Exact canonical V3 qualification plan.
+    pub plan: ArtifactFingerprint,
+    /// Fixed-build target; results from different targets are never pooled.
+    pub target_triple: String,
+    /// Exact retained hardware profile.
+    pub hardware_profile: ArtifactFingerprint,
+    /// Exact approved source archive used for the fixed build.
+    pub source_archive: ArtifactFingerprint,
+    /// Exact Cargo lockfile used for the fixed build.
+    pub cargo_lock: ArtifactFingerprint,
+    /// Exact fixed-build receipt.
+    pub build_receipt: ArtifactFingerprint,
+    /// Exact fixed-build input inventory.
+    pub build_input_inventory: ArtifactFingerprint,
+    /// Exact fixed-build input archive.
+    pub build_input_archive: ArtifactFingerprint,
+    /// Installed fixed benchmark binary.
+    pub fixed_binary: ArtifactFingerprint,
+    /// Exact signed terminal-observation receipt.
+    pub terminal_observation_receipt: ArtifactFingerprint,
+    /// Exact controller-observed terminal evidence wrapper.
+    pub terminal_observation_evidence: ArtifactFingerprint,
+    /// Exact campaign completion manifest that binds the artifact indexes.
+    pub completion: ArtifactFingerprint,
+    /// Exact signed completion anchor that authenticates the completion manifest.
+    pub completion_anchor: ArtifactFingerprint,
+    /// Canonical Criterion artifact index.
+    pub criterion_artifact_index: ArtifactFingerprint,
+    /// Exact number of indexed Criterion estimate artifacts.
+    pub criterion_artifact_count: u32,
+    /// Checked sum of the indexed Criterion estimate artifact byte lengths.
+    pub criterion_artifact_bytes: u64,
+    /// Canonical route artifact index.
+    pub route_artifact_index: ArtifactFingerprint,
+    /// Exact number of indexed route artifacts.
+    pub route_artifact_count: u32,
+    /// Checked sum of the indexed route artifact byte lengths.
+    pub route_artifact_bytes: u64,
+    /// Exact number of ordered Criterion median estimates analyzed.
+    pub timing_estimate_count: u32,
+    /// Literal estimator selected from each Criterion 0.5.1 artifact.
+    pub primary_statistic: String,
+    /// Pinned software implementation used for logarithms and exponentials.
+    pub effect_math_implementation: String,
+    /// Plan-bound deterministic bootstrap replicate count.
+    pub bootstrap_replicates: u32,
+    /// Plan-bound initial `SplitMix64` state.
+    pub bootstrap_seed: u64,
+    /// Plan-bound family-wise confidence level.
+    pub bootstrap_confidence_level: f64,
+    /// Exactly 66 results in manifest paired-cell order.
+    pub cell_effects: Vec<SdJwtIssuanceCellEffects>,
+    /// Individual-operation p50 latency is not inferred from Criterion medians.
+    pub individual_operation_latency_p50: SdJwtIssuanceAnalysisStatus,
+    /// Individual-operation p95 latency is not inferred from Criterion medians.
+    pub individual_operation_latency_p95: SdJwtIssuanceAnalysisStatus,
+    /// Individual-operation p99 latency is not inferred from Criterion medians.
+    pub individual_operation_latency_p99: SdJwtIssuanceAnalysisStatus,
+    /// End-to-end throughput is outside this microbenchmark evidence.
+    pub throughput: SdJwtIssuanceAnalysisStatus,
+    /// Allocation evidence is outside this retained timing matrix.
+    pub allocation_evidence: SdJwtIssuanceAnalysisStatus,
+    /// SIMD or lane utilization is outside this retained timing matrix.
+    pub simd_lane_utilization: SdJwtIssuanceAnalysisStatus,
+    /// Integrity result for the bounded artifacts traversed by this command.
+    pub artifact_integrity_status: String,
+    /// Complete campaign qualification remains a separate phase.
+    pub campaign_qualification_status: String,
+    /// This report can never activate a production threshold.
+    pub production_threshold_activation: bool,
+    /// Activation requires a later, separately reviewed change.
+    pub production_activation_separate: bool,
+    /// Always absent from this nonactivating analysis schema.
+    pub qualified_issuance_thresholds: Option<SdJwtIssuanceThresholds>,
+    /// Truthful boundaries on what this analysis establishes.
+    pub limitations: Vec<String>,
+}
+
 /// Frozen pre-analysis protocol for one SD-JWT issuance campaign.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -234,6 +234,8 @@ enum IssuanceQualificationCommand {
     Plan(IssuanceQualificationPlanArgs),
     /// Validate the bounded offline artifact-integrity slice without qualifying it.
     Analyze(IssuanceQualificationAnalyzeArgs),
+    /// Analyze every indexed route and Criterion median without activating thresholds.
+    AnalyzeIndexed(IssuanceQualificationAnalyzeArgs),
     /// Work with an approved exact Git source archive without starting a campaign.
     SourceArchive(IssuanceSourceArchiveArgs),
 }
@@ -403,6 +405,9 @@ fn main() -> Result<()> {
                 IssuanceQualificationCommand::Analyze(args) => {
                     issuance_qualification::analyze(&args.analysis_request())
                 }
+                IssuanceQualificationCommand::AnalyzeIndexed(args) => {
+                    issuance_qualification::analyze_indexed(&args.analysis_request())
+                }
                 IssuanceQualificationCommand::SourceArchive(args) => match args.command {
                     IssuanceSourceArchiveCommand::Export(args) => {
                         let receipt =
@@ -469,6 +474,44 @@ mod qualification_analyze_cli_tests {
             Path::new("/trust/anchor-public-key.bin")
         );
         assert_eq!(request.output, Path::new("/reports/analysis.json"));
+    }
+
+    #[test]
+    fn analyze_indexed_command_preserves_all_offline_inputs_through_dispatch() {
+        let cli = Cli::try_parse_from([
+            "marty-perf",
+            "qualification",
+            "issuance",
+            "analyze-indexed",
+            "--campaign-root",
+            "/campaign-root",
+            "--route-artifact",
+            "routes/r00_c00_e0.ndjson",
+            "--anchor-public-key",
+            "/trust/anchor-public-key.bin",
+            "--output",
+            "/reports/indexed-analysis.json",
+        ])
+        .expect("parse indexed analyzer command");
+        let Command::Qualification(qualification) = cli.command else {
+            panic!("qualification command")
+        };
+        let QualificationCommand::Issuance(issuance) = qualification.command;
+        let IssuanceQualificationCommand::AnalyzeIndexed(args) = issuance.command else {
+            panic!("analyze-indexed command")
+        };
+
+        let request = args.analysis_request();
+        assert_eq!(request.campaign_root, Path::new("/campaign-root"));
+        assert_eq!(
+            request.route_artifact,
+            Path::new("routes/r00_c00_e0.ndjson")
+        );
+        assert_eq!(
+            request.anchor_public_key,
+            Path::new("/trust/anchor-public-key.bin")
+        );
+        assert_eq!(request.output, Path::new("/reports/indexed-analysis.json"));
     }
 
     #[test]

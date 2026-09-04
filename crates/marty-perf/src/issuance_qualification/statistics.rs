@@ -4,10 +4,16 @@
 //! they are deliberately never exposed as individual-operation tail latency.
 
 use anyhow::{Context, Result};
+use marty_perf_schema::{
+    SdJwtIssuanceCellEffects, SdJwtIssuanceEffectInterval, SdJwtIssuanceQualificationManifest,
+    SdJwtIssuanceQualificationPlan,
+};
 use std::fmt;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+
+pub(super) const EFFECT_MATH_IMPLEMENTATION: &str = "libm_0_2_16_force_soft_floats";
 
 #[derive(Debug)]
 struct ConfidenceInterval {
@@ -170,10 +176,9 @@ pub(super) fn criterion_median(bytes: &[u8]) -> Result<f64> {
     Ok(parsed.median.point_estimate)
 }
 
-#[cfg(test)]
 pub(super) fn round_effects(values: [f64; 8], order: &str) -> Result<[f64; 4]> {
     anyhow::ensure!(values.iter().all(|value| value.is_finite() && *value > 0.0));
-    let logs = values.map(f64::ln);
+    let logs = values.map(libm::log);
     let pair = |adaptive: usize, serial: usize| logs[adaptive] - logs[serial];
     let (serial_first, adaptive_first) = match order {
         "ABBA_FIRST" => (
@@ -194,7 +199,6 @@ pub(super) fn round_effects(values: [f64; 8], order: &str) -> Result<[f64; 4]> {
     ])
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct EffectIntervals {
     pub observed: [f64; 4],
@@ -202,11 +206,9 @@ pub(super) struct EffectIntervals {
     pub upper: [f64; 4],
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy)]
 struct SplitMix64(u64);
 
-#[cfg(test)]
 impl SplitMix64 {
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -221,7 +223,6 @@ impl SplitMix64 {
     }
 }
 
-#[cfg(test)]
 fn sample_index(upper: usize, mut next: impl FnMut() -> u64) -> Result<usize> {
     anyhow::ensure!(upper > 0, "bootstrap requires rounds");
     let upper_u64 = u64::try_from(upper)?;
@@ -240,7 +241,6 @@ fn sample_index(upper: usize, mut next: impl FnMut() -> u64) -> Result<usize> {
     clippy::cast_sign_loss,
     reason = "bounded bootstrap vector indices are exactly representable at campaign limits"
 )]
-#[cfg(test)]
 fn type_7(values: &mut [f64], probability: f64) -> Result<f64> {
     anyhow::ensure!(!values.is_empty() && (0.0..=1.0).contains(&probability));
     anyhow::ensure!(values.iter().all(|value| value.is_finite()));
@@ -255,7 +255,6 @@ fn type_7(values: &mut [f64], probability: f64) -> Result<f64> {
     clippy::cast_precision_loss,
     reason = "validated campaign round counts are at most twenty"
 )]
-#[cfg(test)]
 pub(super) fn bootstrap(
     cells: &[Vec<[f64; 4]>],
     replicates: usize,
@@ -308,8 +307,16 @@ pub(super) fn bootstrap(
         .into_iter()
         .enumerate()
         .map(|(cell, point)| {
-            let lower_o = type_7(&mut diagnostic[cell].clone(), 0.025)?;
-            let upper_o = type_7(&mut diagnostic[cell], 0.975)?;
+            diagnostic[cell].sort_by(f64::total_cmp);
+            let lower_o = type_7_sorted(&diagnostic[cell], 0.025)?;
+            let upper_o = type_7_sorted(&diagnostic[cell], 0.975)?;
+            anyhow::ensure!(
+                simultaneous_radius.is_finite()
+                    && point.iter().all(|value| value.is_finite())
+                    && lower_o.is_finite()
+                    && upper_o.is_finite(),
+                "invalid bootstrap result"
+            );
             Ok(EffectIntervals {
                 observed: point,
                 lower: [
@@ -329,9 +336,158 @@ pub(super) fn bootstrap(
         .collect()
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "bounded bootstrap vector indices are exactly representable at campaign limits"
+)]
+fn type_7_sorted(values: &[f64], probability: f64) -> Result<f64> {
+    anyhow::ensure!(!values.is_empty() && (0.0..=1.0).contains(&probability));
+    anyhow::ensure!(
+        values.iter().all(|value| value.is_finite())
+            && values.windows(2).all(|pair| pair[0] <= pair[1])
+    );
+    let h = probability * (values.len() - 1) as f64;
+    let lower = h.floor() as usize;
+    let fraction = h - lower as f64;
+    Ok(values[lower] + fraction * (values[h.ceil() as usize] - values[lower]))
+}
+
+fn relative_percent(effect: f64) -> Result<f64> {
+    anyhow::ensure!(effect.is_finite(), "invalid effect");
+    let transformed = 100.0 * (libm::exp(effect) - 1.0);
+    anyhow::ensure!(transformed.is_finite(), "relative-percent overflow");
+    Ok(transformed)
+}
+
+fn effect_interval(
+    interval: &EffectIntervals,
+    effect: usize,
+) -> Result<SdJwtIssuanceEffectInterval> {
+    let method = if effect == 3 {
+        "marginal_type_7_95_percent"
+    } else {
+        "simultaneous_common_max_deviation_95_percent"
+    };
+    let point = interval.observed[effect];
+    let lower = interval.lower[effect];
+    let upper = interval.upper[effect];
+    anyhow::ensure!(
+        point.is_finite()
+            && lower.is_finite()
+            && upper.is_finite()
+            && lower <= point
+            && point <= upper,
+        "invalid effect interval"
+    );
+    Ok(SdJwtIssuanceEffectInterval {
+        interval_method: method.to_owned(),
+        point_estimate_log_ratio: point,
+        lower_log_ratio: lower,
+        upper_log_ratio: upper,
+        point_estimate_relative_percent: relative_percent(point)?,
+        lower_relative_percent: relative_percent(lower)?,
+        upper_relative_percent: relative_percent(upper)?,
+    })
+}
+
+fn analyze_cells_with_replicates(
+    medians_nanoseconds: &[f64],
+    manifest: &SdJwtIssuanceQualificationManifest,
+    plan: &SdJwtIssuanceQualificationPlan,
+    replicates: usize,
+) -> Result<Vec<SdJwtIssuanceCellEffects>> {
+    let rounds = usize::try_from(plan.superblocks_per_cell)
+        .context("indexed analysis round count overflow")?;
+    let cells = plan.paired_cell_count;
+    let expansions = usize::try_from(plan.processes_per_superblock)
+        .context("indexed analysis expansion count overflow")?;
+    anyhow::ensure!(
+        rounds == plan.superblock_orders.len()
+            && cells == manifest.paired_cells.len()
+            && cells == super::schedule::PAIRED_CELL_COUNT
+            && expansions == usize::try_from(super::schedule::PROCESSES_PER_SUPERBLOCK)?
+            && medians_nanoseconds.len()
+                == rounds
+                    .checked_mul(cells)
+                    .and_then(|value| value.checked_mul(expansions))
+                    .context("indexed analysis matrix size overflow")?
+            && medians_nanoseconds
+                .iter()
+                .all(|median| median.is_finite() && *median > 0.0)
+            && replicates > 0,
+        "indexed analysis matrix mismatch"
+    );
+
+    let mut effects_by_cell = vec![Vec::with_capacity(rounds); cells];
+    for (round, order) in plan.superblock_orders.iter().enumerate() {
+        for (cell, destination) in effects_by_cell.iter_mut().enumerate() {
+            let start = round
+                .checked_mul(cells)
+                .and_then(|value| value.checked_add(cell))
+                .and_then(|value| value.checked_mul(expansions))
+                .context("indexed analysis matrix position overflow")?;
+            let values: [f64; 8] = medians_nanoseconds[start..start + expansions]
+                .try_into()
+                .context("indexed analysis superblock width")?;
+            destination.push(round_effects(values, order)?);
+        }
+    }
+
+    let intervals = bootstrap(&effects_by_cell, replicates, plan.bootstrap.seed)?;
+    anyhow::ensure!(intervals.len() == cells, "indexed analysis cell coverage");
+    manifest
+        .paired_cells
+        .iter()
+        .zip(intervals)
+        .enumerate()
+        .map(|(cell_ordinal, (cell, interval))| {
+            Ok(SdJwtIssuanceCellEffects {
+                cell_ordinal: u32::try_from(cell_ordinal)
+                    .context("indexed analysis cell ordinal overflow")?,
+                fixture_id: cell.fixture_id.clone(),
+                stage: cell.stage.clone(),
+                serial_benchmark_id: cell.serial_id.clone(),
+                adaptive_benchmark_id: cell.adaptive_id.clone(),
+                d: effect_interval(&interval, 0)?,
+                s: effect_interval(&interval, 1)?,
+                p: effect_interval(&interval, 2)?,
+                o: effect_interval(&interval, 3)?,
+            })
+        })
+        .collect()
+}
+
+/// Analyze the exact plan-bound timing matrix and bootstrap protocol.
+pub(super) fn analyze_cells(
+    medians_nanoseconds: &[f64],
+    manifest: &SdJwtIssuanceQualificationManifest,
+    plan: &SdJwtIssuanceQualificationPlan,
+) -> Result<Vec<SdJwtIssuanceCellEffects>> {
+    analyze_cells_with_replicates(
+        medians_nanoseconds,
+        manifest,
+        plan,
+        usize::try_from(plan.bootstrap.replicates)
+            .context("indexed analysis bootstrap count overflow")?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_inputs() -> (
+        SdJwtIssuanceQualificationManifest,
+        SdJwtIssuanceQualificationPlan,
+    ) {
+        let bytes =
+            include_bytes!("../../tests/fixtures/sd-jwt-issuance-qualification-manifest-v1.json");
+        let manifest = serde_json::from_slice(bytes).unwrap();
+        let plan = super::super::plan_for_manifest(&manifest, bytes).unwrap();
+        (manifest, plan)
+    }
 
     fn valid_criterion() -> String {
         String::from_utf8(
@@ -346,7 +502,7 @@ mod tests {
             round_effects([1.0, 2.0, 32.0, 1.0, 128.0, 1.0, 1.0, 8.0], "ABBA_FIRST").unwrap();
         let baab =
             round_effects([32.0, 1.0, 1.0, 2.0, 1.0, 8.0, 128.0, 1.0], "BAAB_FIRST").unwrap();
-        let unit = 2.0_f64.ln();
+        let unit = libm::log(2.0);
         let expected = [4.0 * unit, 2.0 * unit, 6.0 * unit, -4.0 * unit];
         for (actual, expected) in abba.iter().zip(expected) {
             assert!((*actual - expected).abs() < 1e-12);
@@ -355,6 +511,26 @@ mod tests {
             .iter()
             .zip(baab)
             .all(|(left, right)| (*left - right).abs() < 1e-12));
+    }
+
+    #[test]
+    fn pinned_effect_math_matches_cross_target_bit_goldens() {
+        assert_eq!(
+            [libm::log(0.5), libm::log(2.0), libm::log(10.0)].map(f64::to_bits),
+            [
+                0xbfe6_2e42_fefa_39ef,
+                0x3fe6_2e42_fefa_39ef,
+                0x4002_6bb1_bbb5_5516,
+            ]
+        );
+        assert_eq!(
+            [libm::exp(-1.0), libm::exp(0.1), libm::exp(1.0)].map(f64::to_bits),
+            [
+                0x3fd7_8b56_362c_ef38,
+                0x3ff1_aec7_b35a_00d4,
+                0x4005_bf0a_8b14_576a,
+            ]
+        );
     }
 
     #[test]
@@ -603,6 +779,68 @@ mod tests {
         {
             assert!((*actual - expected).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn full_66_cell_matrix_uses_each_declared_order_and_serializes_deterministically() {
+        let (manifest, plan) = plan_inputs();
+        let mut medians = Vec::with_capacity(10_560);
+        for order in &plan.superblock_orders {
+            let superblock = match order.as_str() {
+                "ABBA_FIRST" => [1.0, 2.0, 32.0, 1.0, 128.0, 1.0, 1.0, 8.0],
+                "BAAB_FIRST" => [32.0, 1.0, 1.0, 2.0, 1.0, 8.0, 128.0, 1.0],
+                _ => panic!("frozen order"),
+            };
+            for _ in 0..manifest.paired_cell_count {
+                medians.extend(superblock);
+            }
+        }
+        assert_eq!(medians.len(), 10_560);
+        let first = analyze_cells_with_replicates(&medians, &manifest, &plan, 17).unwrap();
+        let second = analyze_cells_with_replicates(&medians, &manifest, &plan, 17).unwrap();
+        assert_eq!(first.len(), 66);
+        assert_eq!(first[0].cell_ordinal, 0);
+        assert_eq!(first[65].cell_ordinal, 65);
+        assert_eq!(first[0].fixture_id, manifest.paired_cells[0].fixture_id);
+        assert_eq!(first[65].stage, manifest.paired_cells[65].stage);
+        let unit = libm::log(2.0);
+        for cell in &first {
+            for (actual, expected) in [
+                (cell.d.point_estimate_log_ratio, 4.0 * unit),
+                (cell.s.point_estimate_log_ratio, 2.0 * unit),
+                (cell.p.point_estimate_log_ratio, 6.0 * unit),
+                (cell.o.point_estimate_log_ratio, -4.0 * unit),
+            ] {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+            assert_eq!(
+                cell.d.interval_method,
+                "simultaneous_common_max_deviation_95_percent"
+            );
+            assert_eq!(cell.o.interval_method, "marginal_type_7_95_percent");
+        }
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn cell_analysis_rejects_wrong_cardinality_plan_width_and_percentage_overflow() {
+        let (manifest, plan) = plan_inputs();
+        let medians = vec![100.0; 10_560];
+        assert!(analyze_cells_with_replicates(&medians[..10_559], &manifest, &plan, 3).is_err());
+        let mut wrong_width = plan.clone();
+        wrong_width.processes_per_superblock = 7;
+        assert!(analyze_cells_with_replicates(&medians, &manifest, &wrong_width, 3).is_err());
+        let nonpositive = vec![0.0; 10_560];
+        assert!(analyze_cells_with_replicates(&nonpositive, &manifest, &plan, 3).is_err());
+        let overflowing = EffectIntervals {
+            observed: [1_000.0; 4],
+            lower: [1_000.0; 4],
+            upper: [1_000.0; 4],
+        };
+        assert!(effect_interval(&overflowing, 0).is_err());
     }
 
     #[test]

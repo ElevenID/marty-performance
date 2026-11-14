@@ -31,6 +31,16 @@ will build on these contracts. Results produced before the Rust migration's
 final runtime inventory are labeled `migration-preview` and are not durable
 baselines.
 
+## Source map
+
+The qualification source is organized under
+`crates/marty-perf/src/issuance_qualification/`: `protocol.rs` owns frozen plan
+descriptions, the existing archive/lifecycle/statistics modules own their
+respective validation rules, and `tests.rs` owns the qualification regression
+suite. The parent `issuance_qualification.rs` coordinates planning and analysis.
+This separation does not change the plan schema, canonical bytes, or run-validity
+requirements.
+
 ## Prerequisites
 
 - Rust 1.95
